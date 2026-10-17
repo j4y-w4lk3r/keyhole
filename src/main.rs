@@ -34,6 +34,10 @@ fn run() -> Result<(), String> {
         "list" => cmd_list(args),
         "add" => cmd_add(args),
         "get" => cmd_get(args),
+        "pull" => cmd_pull(args),
+        "push" => cmd_push(args),
+        "serve" => cmd_serve(args),
+        "version" => cmd_version(args),
         other => Err(format!("unknown command '{other}'\n\n{}", help_text())),
     }
 }
@@ -42,6 +46,7 @@ struct Flags {
     positional: Vec<String>,
     recipients: Vec<PathBuf>,
     identity: Option<PathBuf>,
+    base: Option<u64>,
 }
 
 fn parse_flags(args: impl Iterator<Item = String>) -> Result<Flags, String> {
@@ -49,6 +54,7 @@ fn parse_flags(args: impl Iterator<Item = String>) -> Result<Flags, String> {
         positional: Vec::new(),
         recipients: Vec::new(),
         identity: None,
+        base: None,
     };
     let mut args = args.peekable();
     while let Some(arg) = args.next() {
@@ -60,6 +66,12 @@ fn parse_flags(args: impl Iterator<Item = String>) -> Result<Flags, String> {
             "-i" => {
                 let path = args.next().ok_or("-i needs an identity file")?;
                 flags.identity = Some(PathBuf::from(path));
+            }
+            "--base" => {
+                let n = args
+                    .next()
+                    .ok_or("--base needs the version you downloaded")?;
+                flags.base = Some(n.parse().map_err(|_| "--base needs a number")?);
             }
             "-h" | "--help" => return Err(help_text()),
             other if other.starts_with('-') => return Err(format!("unknown flag {other}")),
@@ -114,6 +126,45 @@ fn cmd_add(args: impl Iterator<Item = String>) -> Result<(), String> {
     let item = Item::new(name, username, password, "");
     vault.add(item)?;
     store(Path::new(vault_path), &vault)
+}
+
+fn cmd_pull(args: impl Iterator<Item = String>) -> Result<(), String> {
+    let flags = parse_flags(args)?;
+    let [shelf_dir, dest] = two_positionals(&flags, "pull SHELF DEST")?;
+    let shelf = keyhole::shelf::Shelf::open(Path::new(shelf_dir))?;
+    let Some(rev) = shelf.fetch()? else {
+        return Err("shelf is empty".into());
+    };
+    let dest = Path::new(dest);
+    let tmp = dest.with_extension("age.tmp");
+    std::fs::write(&tmp, &rev.bytes).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, dest).map_err(|e| format!("replace {}: {e}", dest.display()))?;
+    eprintln!("version {}", rev.version);
+    Ok(())
+}
+
+fn cmd_push(args: impl Iterator<Item = String>) -> Result<(), String> {
+    let flags = parse_flags(args)?;
+    let [shelf_dir, vault_path] = two_positionals(&flags, "push SHELF VAULT --base VERSION")?;
+    let expected = flags
+        .base
+        .ok_or("push needs --base VERSION (use 0 for an empty shelf)")?;
+    let bytes = std::fs::read(vault_path).map_err(|e| format!("read {vault_path}: {e}"))?;
+    let shelf = keyhole::shelf::Shelf::open(Path::new(shelf_dir))?;
+    let version = shelf.publish(expected, &bytes)?;
+    eprintln!("version {version}");
+    Ok(())
+}
+
+fn cmd_serve(args: impl Iterator<Item = String>) -> Result<(), String> {
+    let flags = parse_flags(args)?;
+    let [shelf_dir, addr] = two_positionals(&flags, "serve SHELF ADDR")?;
+    keyhole::shelf::serve(Path::new(shelf_dir), addr)
+}
+
+fn cmd_version(_args: impl Iterator<Item = String>) -> Result<(), String> {
+    println!("keyhole 0.1.0");
+    Ok(())
 }
 
 fn cmd_get(args: impl Iterator<Item = String>) -> Result<(), String> {
@@ -177,9 +228,14 @@ keyhole — a local age vault
   keyhole list VAULT -i IDENTITY
   keyhole add  VAULT -i IDENTITY NAME
   keyhole get  VAULT -i IDENTITY NAME
+  keyhole pull SHELF DEST
+  keyhole push SHELF VAULT --base VERSION
+  keyhole serve SHELF 127.0.0.1:8787
+  keyhole version
 
 The password is typed at the prompt. It is not an argument, so it stays out of shell history.
 list prints names. get prints the password on stdout and the username on stderr.
+push is accepted only when --base is the shelf's current version. The first push uses --base 0.
 "
     .into()
 }

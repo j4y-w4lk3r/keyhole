@@ -2,6 +2,7 @@
 //! Decryption happens in this process. A future sync server only stores the file.
 
 pub mod ageio;
+pub mod shelf;
 pub mod vault;
 
 use std::path::Path;

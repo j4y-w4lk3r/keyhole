@@ -33,7 +33,21 @@ shred -u /dev/shm/keyhole-identity.txt
 A real vault should be encrypted to every recovery recipient you already have
 (daily, backup, root, and the passphrase recipient), not to a single software key.
 
+The picture of the system, including the versioned shelf, is in [docs/architecture.md](docs/architecture.md).
+Update that file when the design changes.
+
+## Shelf
+
+A shelf stores age files and a version. It does not decrypt.
+
+```bash
+./target/release/keyhole push /tmp/shelf /dev/shm/vault.age --base 0
+./target/release/keyhole pull /tmp/shelf /dev/shm/vault-copy.age
+./target/release/keyhole serve /tmp/shelf 127.0.0.1:8787
+```
+
+A second push must pass the version printed by the first push. `--base 0` again is a conflict.
+
 ## Not in this version
 
-No browser extension, no phone app, no accounts, no server that can decrypt.
-Sync, for now, is copying the `.age` file. That is intentional.
+No browser extension, no phone app, no server that can decrypt.
