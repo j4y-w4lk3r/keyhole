@@ -56,7 +56,7 @@ A shelf stores age files and a version. It does not decrypt.
 ./target/release/keyhole serve /tmp/shelf 127.0.0.1:8787
 ```
 
-A second push must pass the version printed by the first push. `--base 0` again is a conflict. `pull` refuses a version older than this machine has seen, unless you pass `--accept-older`. `serve` prints the path of `write.token`. GET is open. PUT needs `Authorization: Bearer` and that token, plus `X-Keyhole-Signature`.
+A second push must pass the version printed by the first push. `--base 0` again is a conflict. `pull` refuses a version older than this machine has seen, unless you pass `--accept-older`. `bash scripts/protect-highwater.sh` marks that memory append-only. `serve` prints the path of `write.token`. GET is open. PUT needs `Authorization: Bearer` and that token, plus `X-Keyhole-Signature`.
 
 ## Not in this version
 

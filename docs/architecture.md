@@ -83,7 +83,7 @@ sequenceDiagram
 - **Secrets are typed at a prompt.** They are not command arguments, and they are not log lines. Error text does not include an item, a password, or the identity contents.
 - **The process refuses three leaks.** Core dumps are off. `get` on a terminal uses the alternate screen and waits for Enter. The identity file must be mode 600 or 400, owned by you, and not a link.
 - **`age` and `gpg` are pinned.** Keyhole runs `/usr/bin/age` and `/usr/bin/gpg` only when their SHA-256 values match `age.pin` and `gpg.pin`. Those pins are compiled into the binary. An upgrade is `bash scripts/update-age-pin.sh` or `bash scripts/update-age-pin.sh gpg.pin`. The script asks for yes, rewrites the pin, and rebuilds.
-- **The shelf is not the trust.** A write to `serve` needs the token in `write.token`. This laptop remembers the highest version it has seen and refuses an older one. A vault opens only after a pinned OpenPGP key's signature checks, and only when every age recipient is pinned. The age header must contain the same number of X25519 stanzas as the vault lists. `rekey` is the explicit command that changes recipients.
+- **The shelf is not the trust.** A write to `serve` needs the token in `write.token`. This laptop appends the highest version it has seen and refuses an older one. `bash scripts/protect-highwater.sh` marks that directory append-only. A normal user cannot delete it or truncate a file the script has marked. Root can clear the flag. A vault opens only after a pinned OpenPGP key's signature checks, and only when every age recipient is pinned. The age header must contain the same number of X25519 stanzas as the vault lists. `rekey` is the explicit command that changes recipients.
 
 ## Where the shelf runs
 

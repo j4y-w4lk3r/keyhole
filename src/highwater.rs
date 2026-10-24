@@ -13,8 +13,7 @@ pub struct HighWater {
 impl HighWater {
     pub fn open(dir: &Path) -> Result<Self, String> {
         fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
-        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
-            .map_err(|e| format!("chmod {}: {e}", dir.display()))?;
+        ensure_mode(dir, 0o700)?;
         Ok(Self {
             dir: dir.to_path_buf(),
         })
@@ -30,30 +29,25 @@ impl HighWater {
             return Ok(0);
         }
         let text = fs::read_to_string(&path).map_err(|e| format!("read high water: {e}"))?;
-        text.trim()
-            .parse()
-            .map_err(|_| format!("bad high water in {}", path.display()))
+        highest_in(&text).map_err(|e| format!("{e} in {}", path.display()))
     }
 
     /// Remember `version` when it is newer. An older number does not lower the memory.
+    /// The new number is appended, so a file marked append-only can still grow.
     pub fn note(&self, shelf: &Path, version: u64) -> Result<(), String> {
         let seen = self.highest(shelf)?;
         if version <= seen {
             return Ok(());
         }
         let path = self.slot(shelf)?;
-        let tmp = path.with_extension("tmp");
-        {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&tmp)
-                .map_err(|e| format!("write {}: {e}", tmp.display()))?;
-            writeln!(file, "{version}").map_err(|e| format!("write {}: {e}", tmp.display()))?;
-        }
-        fs::rename(&tmp, &path).map_err(|e| format!("save {}: {e}", path.display()))?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(&path)
+            .map_err(|e| format!("write {}: {e}", path.display()))?;
+        writeln!(file, "{version}").map_err(|e| format!("write {}: {e}", path.display()))?;
         Ok(())
     }
 
@@ -74,6 +68,36 @@ impl HighWater {
     }
 }
 
+fn highest_in(text: &str) -> Result<u64, String> {
+    let mut best = 0u64;
+    let mut any = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let version: u64 = line
+            .parse()
+            .map_err(|_| format!("bad high water line {line}"))?;
+        any = true;
+        best = best.max(version);
+    }
+    if any { Ok(best) } else { Ok(0) }
+}
+
+fn ensure_mode(path: &Path, mode: u32) -> Result<(), String> {
+    let found = fs::metadata(path)
+        .map_err(|e| format!("stat {}: {e}", path.display()))?
+        .permissions()
+        .mode()
+        & 0o777;
+    if found == mode {
+        return Ok(());
+    }
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))
+        .map_err(|e| format!("chmod {}: {e}", path.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,6 +116,10 @@ mod tests {
         memory.check(&shelf, 2, true).unwrap();
         memory.note(&shelf, 2).unwrap();
         assert_eq!(memory.highest(&shelf).unwrap(), 4);
+        memory.note(&shelf, 5).unwrap();
+        assert_eq!(memory.highest(&shelf).unwrap(), 5);
+        let text = fs::read_to_string(memory.slot(&shelf).unwrap()).unwrap();
+        assert_eq!(text, "4\n5\n");
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&shelf);
     }
