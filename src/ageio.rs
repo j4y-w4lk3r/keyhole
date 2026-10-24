@@ -7,7 +7,39 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 pub fn decrypt(identity: &Path, vault: &Path) -> Result<Vec<u8>, String> {
+    let bytes = fs::read(vault).map_err(|e| format!("read {}: {e}", vault.display()))?;
+    decrypt_bytes(identity, &bytes)
+}
+
+/// Decrypt `age_bytes` after the caller has verified those exact bytes.
+pub fn decrypt_bytes(identity: &Path, age_bytes: &[u8]) -> Result<Vec<u8>, String> {
     crate::harden::check_identity(identity)?;
+    let dir = PathBuf::from(format!(
+        "/dev/shm/keyhole-dec-{}-{}",
+        std::process::id(),
+        crate::state::random_hex(4)?
+    ));
+    fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))
+        .map_err(|e| format!("chmod {}: {e}", dir.display()))?;
+    let path = dir.join("vault.age");
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .map_err(|e| format!("write {}: {e}", path.display()))?;
+        file.write_all(age_bytes)
+            .map_err(|e| format!("write {}: {e}", path.display()))?;
+    }
+    let result = decrypt_path(identity, &path);
+    let _ = fs::remove_dir_all(&dir);
+    result
+}
+
+fn decrypt_path(identity: &Path, vault: &Path) -> Result<Vec<u8>, String> {
     let output = crate::agebin::age_command()?
         .arg("-d")
         .arg("-i")
@@ -75,6 +107,48 @@ fn tmp_path(destination: &Path) -> PathBuf {
     let mut name = destination.as_os_str().to_owned();
     name.push(".tmp");
     PathBuf::from(name)
+}
+
+/// How many X25519 recipient stanzas the header contains.
+/// age does not write the recipient name into the header, so a longer header
+/// than the vault's recipient list is the sign of an extra hidden recipient.
+pub fn x25519_stanza_count(bytes: &[u8]) -> Result<usize, String> {
+    let header = header_text(bytes)?;
+    let mut count = 0usize;
+    for line in header.lines() {
+        if !line.starts_with("-> ") {
+            continue;
+        }
+        if !line.starts_with("-> X25519 ") {
+            return Err("age file has a recipient type other than X25519".into());
+        }
+        count += 1;
+    }
+    if count == 0 {
+        return Err("age file has no recipients".into());
+    }
+    Ok(count)
+}
+
+fn header_text(bytes: &[u8]) -> Result<&str, String> {
+    let mut start = 0usize;
+    while start < bytes.len() {
+        let rest = &bytes[start..];
+        let Some(nl) = rest.iter().position(|byte| *byte == b'\n') else {
+            return Err("age header has no MAC line".into());
+        };
+        let line = &rest[..nl];
+        let next = start + nl + 1;
+        if line.starts_with(b"--- ") {
+            return std::str::from_utf8(&bytes[..next])
+                .map_err(|_| "age header is not text".to_string());
+        }
+        start = next;
+        if start > 1024 * 1024 {
+            return Err("age header is too large".into());
+        }
+    }
+    Err("age header has no MAC line".into())
 }
 
 fn age_missing(err: std::io::Error) -> String {

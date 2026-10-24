@@ -82,7 +82,8 @@ sequenceDiagram
 - **Argon2id and scrypt are the password KDFs to use.** There is not a stronger everyday replacement. More memory makes guessing harder until the unlock becomes unpleasant.
 - **Secrets are typed at a prompt.** They are not command arguments, and they are not log lines. Error text does not include an item, a password, or the identity contents.
 - **The process refuses three leaks.** Core dumps are off. `get` on a terminal uses the alternate screen and waits for Enter. The identity file must be mode 600 or 400, owned by you, and not a link.
-- **`age` is pinned.** Keyhole runs `/usr/bin/age` only when its SHA-256 matches `age.pin`. That pin is compiled into the binary. An upgrade is `bash scripts/update-age-pin.sh`, which asks for yes, rewrites `age.pin`, and rebuilds.
+- **`age` and `gpg` are pinned.** Keyhole runs `/usr/bin/age` and `/usr/bin/gpg` only when their SHA-256 values match `age.pin` and `gpg.pin`. Those pins are compiled into the binary. An upgrade is `bash scripts/update-age-pin.sh` or `bash scripts/update-age-pin.sh gpg.pin`. The script asks for yes, rewrites the pin, and rebuilds.
+- **The shelf is not the trust.** A write to `serve` needs the token in `write.token`. This laptop remembers the highest version it has seen and refuses an older one. A vault opens only after a pinned OpenPGP key's signature checks, and only when every age recipient is pinned. The age header must contain the same number of X25519 stanzas as the vault lists. `rekey` is the explicit command that changes recipients.
 
 ## Where the shelf runs
 
@@ -92,4 +93,4 @@ PiKVM stores no vault secrets. The laptop's system disk encryption is a later ma
 
 ## Not built yet
 
-A write token on `serve`. A laptop-side record of the highest shelf version. An OpenPGP signature checked before decrypt, and an explicit `rekey`. A daemon that locks on idle comes later, then a browser extension that can ask for one confirmed origin.
+A daemon that locks on idle, then a browser extension that can ask for one confirmed origin. How many old `vault.N.age` copies to keep. `mlock`, so an unlocked vault is not written to swap.

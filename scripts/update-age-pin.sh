@@ -1,12 +1,19 @@
 #!/bin/bash
-# Trust the age binary named in age.pin, then rebuild keyhole.
-# Run this yourself after an age upgrade. It is not a package hook:
+# Trust the binary named in a pin file, then rebuild keyhole.
+#   bash scripts/update-age-pin.sh          # age.pin
+#   bash scripts/update-age-pin.sh gpg.pin  # gpg.pin
+# Run this yourself after an upgrade. It is not a package hook:
 # a hook would bless whatever file appeared at that path.
 
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
-pin="$root/age.pin"
+name="${1:-age.pin}"
+if [[ "$name" == */* ]]; then
+  echo "pass a pin file name in the repo root, such as age.pin or gpg.pin" >&2
+  exit 1
+fi
+pin="$root/$name"
 
 if [[ ! -f "$pin" ]]; then
   echo "missing $pin" >&2
@@ -18,11 +25,11 @@ path="${lines[0]:-}"
 old="${lines[1]:-}"
 
 if [[ "$path" != /* ]]; then
-  echo "age.pin path must be absolute" >&2
+  echo "$name path must be absolute" >&2
   exit 1
 fi
 if [[ ! "$old" =~ ^[0-9a-fA-F]{64}$ ]]; then
-  echo "age.pin sha256 must be 64 hex characters" >&2
+  echo "$name sha256 must be 64 hex characters" >&2
   exit 1
 fi
 if [[ ! -f "$path" ]]; then
@@ -32,11 +39,11 @@ fi
 
 new=$(sha256sum -- "$path" | awk '{print $1}')
 if [[ "$new" == "$old" ]]; then
-  echo "$path already matches age.pin"
+  echo "$path already matches $name"
   exit 0
 fi
 
-echo "age.pin    $old"
+echo "$name    $old"
 echo "installed  $new"
 echo "path       $path"
 

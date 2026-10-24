@@ -59,6 +59,14 @@ impl Vault {
         &self.recipients
     }
 
+    pub fn set_recipients(&mut self, recipients: Vec<String>) -> Result<(), String> {
+        if recipients.is_empty() {
+            return Err("vault has no recipients".into());
+        }
+        self.recipients = recipients;
+        Ok(())
+    }
+
     pub fn names(&self) -> Vec<&str> {
         self.items.iter().map(Item::name).collect()
     }

@@ -2,9 +2,12 @@
 
 use std::env;
 use std::io::{self, IsTerminal, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use keyhole::highwater::HighWater;
+use keyhole::trust::Trust;
 use keyhole::vault::{self, Item};
 use keyhole::{load, store};
 use zeroize::Zeroize;
@@ -41,6 +44,9 @@ fn run() -> Result<(), String> {
         "pull" => cmd_pull(args),
         "push" => cmd_push(args),
         "serve" => cmd_serve(args),
+        "sign" => cmd_sign(args),
+        "rekey" => cmd_rekey(args),
+        "trust" => cmd_trust(args),
         "version" => cmd_version(args),
         other => Err(format!("unknown command '{other}'\n\n{}", help_text())),
     }
@@ -51,6 +57,7 @@ struct Flags {
     recipients: Vec<PathBuf>,
     identity: Option<PathBuf>,
     base: Option<u64>,
+    accept_older: bool,
 }
 
 fn parse_flags(args: impl Iterator<Item = String>) -> Result<Flags, String> {
@@ -59,6 +66,7 @@ fn parse_flags(args: impl Iterator<Item = String>) -> Result<Flags, String> {
         recipients: Vec::new(),
         identity: None,
         base: None,
+        accept_older: false,
     };
     let mut args = args.peekable();
     while let Some(arg) = args.next() {
@@ -77,6 +85,7 @@ fn parse_flags(args: impl Iterator<Item = String>) -> Result<Flags, String> {
                     .ok_or("--base needs the version you downloaded")?;
                 flags.base = Some(n.parse().map_err(|_| "--base needs a number")?);
             }
+            "--accept-older" => flags.accept_older = true,
             "-h" | "--help" => return Err(help_text()),
             other if other.starts_with('-') => return Err(format!("unknown flag {other}")),
             other => flags.positional.push(other.to_string()),
@@ -98,15 +107,17 @@ fn cmd_init(args: impl Iterator<Item = String>) -> Result<(), String> {
     for path in &flags.recipients {
         recipients.extend(vault::read_recipient_file(path)?);
     }
+    let trust = open_trust()?;
+    trust.check_recipients(&recipients)?;
     let vault = vault::Vault::empty(recipients);
-    store(Path::new(vault_path), &vault)
+    store(Path::new(vault_path), &vault, &trust)
 }
 
 fn cmd_list(args: impl Iterator<Item = String>) -> Result<(), String> {
     let flags = parse_flags(args)?;
     let [vault_path] = one_positional(&flags, "list VAULT -i IDENTITY")?;
     let identity = flags.identity.as_deref().ok_or("list needs -i IDENTITY")?;
-    let vault = load(identity, Path::new(vault_path))?;
+    let vault = load(identity, Path::new(vault_path), &open_trust()?)?;
     for name in vault.names() {
         println!("{name}");
     }
@@ -117,7 +128,7 @@ fn cmd_add(args: impl Iterator<Item = String>) -> Result<(), String> {
     let flags = parse_flags(args)?;
     let [vault_path, name] = two_positionals(&flags, "add VAULT -i IDENTITY NAME")?;
     let identity = flags.identity.as_deref().ok_or("add needs -i IDENTITY")?;
-    let mut vault = load(identity, Path::new(vault_path))?;
+    let mut vault = load(identity, Path::new(vault_path), &open_trust()?)?;
     let username = prompt_line("username: ")?;
     let mut password = prompt_secret("password: ")?;
     let mut confirm = prompt_secret("confirm: ")?;
@@ -129,20 +140,24 @@ fn cmd_add(args: impl Iterator<Item = String>) -> Result<(), String> {
     confirm.zeroize();
     let item = Item::new(name, username, password, "");
     vault.add(item)?;
-    store(Path::new(vault_path), &vault)
+    store(Path::new(vault_path), &vault, &open_trust()?)
 }
 
 fn cmd_pull(args: impl Iterator<Item = String>) -> Result<(), String> {
     let flags = parse_flags(args)?;
-    let [shelf_dir, dest] = two_positionals(&flags, "pull SHELF DEST")?;
+    let [shelf_dir, dest] = two_positionals(&flags, "pull SHELF DEST [--accept-older]")?;
     let shelf = keyhole::shelf::Shelf::open(Path::new(shelf_dir))?;
     let Some(rev) = shelf.fetch()? else {
         return Err("shelf is empty".into());
     };
+    let shelf_path = std::fs::canonicalize(shelf_dir).map_err(|e| format!("shelf path: {e}"))?;
+    let memory = open_memory()?;
+    memory.check(&shelf_path, rev.version, flags.accept_older)?;
+    open_trust()?.verify_detached(&rev.bytes, &rev.signature)?;
     let dest = Path::new(dest);
-    let tmp = dest.with_extension("age.tmp");
-    std::fs::write(&tmp, &rev.bytes).map_err(|e| format!("write {}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, dest).map_err(|e| format!("replace {}: {e}", dest.display()))?;
+    write_private(dest, &rev.bytes)?;
+    write_private(&keyhole::trust::signature_path(dest), &rev.signature)?;
+    memory.note(&shelf_path, rev.version)?;
     eprintln!("version {}", rev.version);
     Ok(())
 }
@@ -153,11 +168,92 @@ fn cmd_push(args: impl Iterator<Item = String>) -> Result<(), String> {
     let expected = flags
         .base
         .ok_or("push needs --base VERSION (use 0 for an empty shelf)")?;
-    let bytes = std::fs::read(vault_path).map_err(|e| format!("read {vault_path}: {e}"))?;
+    let vault_path = Path::new(vault_path);
+    let bytes =
+        std::fs::read(vault_path).map_err(|e| format!("read {}: {e}", vault_path.display()))?;
+    let signature = std::fs::read(keyhole::trust::signature_path(vault_path))
+        .map_err(|_| "vault has no signature".to_string())?;
+    open_trust()?.verify_detached(&bytes, &signature)?;
     let shelf = keyhole::shelf::Shelf::open(Path::new(shelf_dir))?;
-    let version = shelf.publish(expected, &bytes)?;
+    let version = shelf.publish(expected, &bytes, &signature)?;
+    let shelf_path = std::fs::canonicalize(shelf_dir).map_err(|e| format!("shelf path: {e}"))?;
+    open_memory()?.note(&shelf_path, version)?;
     eprintln!("version {version}");
     Ok(())
+}
+
+fn cmd_sign(args: impl Iterator<Item = String>) -> Result<(), String> {
+    let flags = parse_flags(args)?;
+    let [vault_path] = one_positional(&flags, "sign VAULT")?;
+    open_trust()?.sign(Path::new(vault_path))
+}
+
+fn cmd_rekey(args: impl Iterator<Item = String>) -> Result<(), String> {
+    let flags = parse_flags(args)?;
+    let [vault_path] = one_positional(&flags, "rekey VAULT -i IDENTITY -R RECIPIENT")?;
+    let identity = flags.identity.as_deref().ok_or("rekey needs -i IDENTITY")?;
+    if flags.recipients.is_empty() {
+        return Err("rekey needs at least one -R recipient file".into());
+    }
+    let trust = open_trust()?;
+    let mut vault = load(identity, Path::new(vault_path), &trust)?;
+    let mut recipients = Vec::new();
+    for path in &flags.recipients {
+        recipients.extend(vault::read_recipient_file(path)?);
+    }
+    trust.check_recipients(&recipients)?;
+    vault.set_recipients(recipients)?;
+    store(Path::new(vault_path), &vault, &trust)
+}
+
+fn cmd_trust(mut args: impl Iterator<Item = String>) -> Result<(), String> {
+    let sub = args.next().ok_or(
+        "usage: keyhole trust allow-signer FINGERPRINT | use-signer FINGERPRINT | allow-recipient AGE1 | deny-recipient AGE1",
+    )?;
+    let trust = open_trust()?;
+    match sub.as_str() {
+        "allow-signer" => {
+            let fpr = args.next().ok_or("allow-signer needs a fingerprint")?;
+            trust.allow_signer(&fpr)
+        }
+        "use-signer" => {
+            let fpr = args.next().ok_or("use-signer needs a fingerprint")?;
+            trust.use_signer(&fpr)
+        }
+        "allow-recipient" => {
+            let recipient = args
+                .next()
+                .ok_or("allow-recipient needs an age1 public key")?;
+            trust.allow_recipient(&recipient)
+        }
+        "deny-recipient" => {
+            let recipient = args
+                .next()
+                .ok_or("deny-recipient needs an age1 public key")?;
+            trust.deny_recipient(&recipient)
+        }
+        other => Err(format!("unknown trust command '{other}'")),
+    }
+}
+
+fn open_trust() -> Result<Trust, String> {
+    Trust::open(&Trust::default_dir()?)
+}
+
+fn open_memory() -> Result<HighWater, String> {
+    HighWater::open(&HighWater::default_dir()?)
+}
+
+fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let tmp = {
+        let mut name = path.as_os_str().to_owned();
+        name.push(".tmp");
+        PathBuf::from(name)
+    };
+    std::fs::write(&tmp, bytes).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+        .map_err(|e| format!("chmod {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("replace {}: {e}", path.display()))
 }
 
 fn cmd_serve(args: impl Iterator<Item = String>) -> Result<(), String> {
@@ -175,7 +271,7 @@ fn cmd_get(args: impl Iterator<Item = String>) -> Result<(), String> {
     let flags = parse_flags(args)?;
     let [vault_path, name] = two_positionals(&flags, "get VAULT -i IDENTITY NAME")?;
     let identity = flags.identity.as_deref().ok_or("get needs -i IDENTITY")?;
-    let vault = load(identity, Path::new(vault_path))?;
+    let vault = load(identity, Path::new(vault_path), &open_trust()?)?;
     let Some(item) = vault.get(name) else {
         return Err(format!("no entry '{name}'"));
     };
@@ -239,14 +335,23 @@ keyhole — a local age vault
   keyhole list VAULT -i IDENTITY
   keyhole add  VAULT -i IDENTITY NAME
   keyhole get  VAULT -i IDENTITY NAME
-  keyhole pull SHELF DEST
+  keyhole sign VAULT
+  keyhole rekey VAULT -i IDENTITY -R RECIPIENT [-R RECIPIENT...]
+  keyhole trust allow-signer FINGERPRINT
+  keyhole trust use-signer FINGERPRINT
+  keyhole trust allow-recipient AGE1
+  keyhole trust deny-recipient AGE1
+  keyhole pull SHELF DEST [--accept-older]
   keyhole push SHELF VAULT --base VERSION
   keyhole serve SHELF 127.0.0.1:8787
   keyhole version
 
 The password is typed at the prompt. It is not an argument, so it stays out of shell history.
 list prints names. On a terminal, get shows the password on a screen that is discarded when you press Enter. When stdout is a pipe, get writes the password once and the username on stderr.
+A vault is opened only when its signature is from a pinned signer and every recipient is pinned.
 push is accepted only when --base is the shelf's current version. The first push uses --base 0.
+pull refuses a version older than this machine has already seen, unless --accept-older is set.
+serve keeps its write token in SHELF/write.token. GET does not need it. PUT does.
 "
     .into()
 }

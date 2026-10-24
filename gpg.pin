@@ -1,0 +1,4 @@
+# Absolute path, then the SHA-256 of that file.
+# This text is compiled into keyhole. Change it only when you mean to trust a new gpg binary.
+/usr/bin/gpg
+ffdf75b9133c3dcf0bf53896801b9e4559cb4f15031c9a2bf24821cdcddd7cc6
