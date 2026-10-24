@@ -12,8 +12,9 @@ License: AGPL-3.0-or-later. See `LICENSE`.
 
 - The file on disk is age ciphertext. A copy on a VPS, a USB stick, or a NAS is still ciphertext.
 - Opening it needs an age identity. With a FIDO identity, that means the key and a touch.
+- The `age` program must be `/usr/bin/age`, and its SHA-256 must match `age.pin`. After an age upgrade, run `bash scripts/update-age-pin.sh` and type `yes`.
 - `keyhole` asks for the entry password on the terminal. It will not take that password as a command argument.
-- `list` prints names. `get` prints the secret on stdout.
+- `list` prints names. On a terminal, `get` shows the secret on a screen that is discarded when you press Enter. A pipe still receives the secret, because that program asked for it.
 
 ## Try it with a software key
 

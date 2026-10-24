@@ -1,7 +1,7 @@
 //! CLI for a local age vault. Passwords are read from the terminal, never from argv.
 
 use std::env;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -10,6 +10,10 @@ use keyhole::{load, store};
 use zeroize::Zeroize;
 
 fn main() -> ExitCode {
+    if let Err(err) = keyhole::harden::disable_core_dumps() {
+        eprintln!("keyhole: {err}");
+        return ExitCode::FAILURE;
+    }
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
@@ -175,11 +179,18 @@ fn cmd_get(args: impl Iterator<Item = String>) -> Result<(), String> {
     let Some(item) = vault.get(name) else {
         return Err(format!("no entry '{name}'"));
     };
-    if !item.username().is_empty() {
-        eprintln!("username: {}", item.username());
+    match keyhole::reveal::secret_sink(io::stdout().is_terminal()) {
+        keyhole::reveal::SecretSink::Terminal => {
+            keyhole::reveal::reveal_on_terminal(item.username(), item.password())
+        }
+        keyhole::reveal::SecretSink::Pipe => {
+            if !item.username().is_empty() {
+                eprintln!("username: {}", item.username());
+            }
+            println!("{}", item.password());
+            Ok(())
+        }
     }
-    println!("{}", item.password());
-    Ok(())
 }
 
 fn one_positional<'a>(flags: &'a Flags, usage: &str) -> Result<[&'a str; 1], String> {
@@ -234,7 +245,7 @@ keyhole — a local age vault
   keyhole version
 
 The password is typed at the prompt. It is not an argument, so it stays out of shell history.
-list prints names. get prints the password on stdout and the username on stderr.
+list prints names. On a terminal, get shows the password on a screen that is discarded when you press Enter. When stdout is a pipe, get writes the password once and the username on stderr.
 push is accepted only when --base is the shelf's current version. The first push uses --base 0.
 "
     .into()

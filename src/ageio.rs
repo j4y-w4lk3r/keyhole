@@ -4,10 +4,11 @@ use std::fs;
 use std::io::{ErrorKind, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 pub fn decrypt(identity: &Path, vault: &Path) -> Result<Vec<u8>, String> {
-    let output = Command::new("age")
+    crate::harden::check_identity(identity)?;
+    let output = crate::agebin::age_command()?
         .arg("-d")
         .arg("-i")
         .arg(identity)
@@ -42,7 +43,7 @@ pub fn encrypt_replacing(
 }
 
 fn encrypt_to(recipients: &[String], plaintext: &[u8], destination: &Path) -> Result<(), String> {
-    let mut cmd = Command::new("age");
+    let mut cmd = crate::agebin::age_command()?;
     for recipient in recipients {
         if !recipient.starts_with("age1") {
             return Err("refusing a recipient that is not an age public key".into());
@@ -78,7 +79,7 @@ fn tmp_path(destination: &Path) -> PathBuf {
 
 fn age_missing(err: std::io::Error) -> String {
     if err.kind() == ErrorKind::NotFound {
-        "age is not installed".into()
+        "/usr/bin/age is not installed".into()
     } else {
         err.to_string()
     }

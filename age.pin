@@ -1,0 +1,4 @@
+# Absolute path, then the SHA-256 of that file.
+# This text is compiled into keyhole. Change it only when you mean to trust a new age binary.
+/usr/bin/age
+5b019ea75c470967c39a3cacb4035e8ae2bdfe94c7f3ff9ff3655459122c06c1

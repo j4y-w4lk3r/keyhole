@@ -80,9 +80,16 @@ sequenceDiagram
 - **X25519 and ChaCha20-Poly1305.** This is the current age design. A later hybrid post-quantum mode should arrive as an age upgrade, not as a second format.
 - **The 1Password idea, in age's shape.** A stolen file must not be openable with only a password. Encrypt to the hardware recipients, and keep the identity off the shelf. A software identity sitting next to the vault is the practice setup, not the real one.
 - **Argon2id and scrypt are the password KDFs to use.** There is not a stronger everyday replacement. More memory makes guessing harder until the unlock becomes unpleasant.
-- **Secrets are typed at a prompt.** They are not command arguments, and they are not log lines.
+- **Secrets are typed at a prompt.** They are not command arguments, and they are not log lines. Error text does not include an item, a password, or the identity contents.
+- **The process refuses three leaks.** Core dumps are off. `get` on a terminal uses the alternate screen and waits for Enter. The identity file must be mode 600 or 400, owned by you, and not a link.
+- **`age` is pinned.** Keyhole runs `/usr/bin/age` only when its SHA-256 matches `age.pin`. That pin is compiled into the binary. An upgrade is `bash scripts/update-age-pin.sh`, which asks for yes, rewrites `age.pin`, and rebuilds.
+
+## Where the shelf runs
+
+The shelf listens on this machine at `127.0.0.1`, or later on a Tailscale address. It has no public port. Tailscale already hides the café address from the VPS. A Mullvad exit node is for browsing the public web. Vault sync stays on the tailnet.
+
+PiKVM stores no vault secrets. The laptop's system disk encryption is a later maintenance window.
 
 ## Not built yet
 
-A long-running daemon, a browser extension, and a phone client.
-The shelf listens only where you bind it. `127.0.0.1` is the right first address.
+A write token on `serve`. A laptop-side record of the highest shelf version. An OpenPGP signature checked before decrypt, and an explicit `rekey`. A daemon that locks on idle comes later, then a browser extension that can ask for one confirmed origin.
