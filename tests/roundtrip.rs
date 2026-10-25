@@ -1,8 +1,8 @@
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 
 use keyhole::store;
 use keyhole::trust::Trust;
@@ -336,4 +336,142 @@ fn an_extra_age_recipient_is_refused() {
         panic!("hidden recipient was accepted");
     };
     assert!(err.contains("hidden"), "{err}");
+}
+
+#[test]
+fn daemon_locks_when_idle_and_unlock_reads_again() {
+    let practice = Practice::new("daemon");
+    let recipient = fs::read_to_string(&practice.recipient_file)
+        .unwrap()
+        .trim()
+        .to_string();
+    let mut vault = Vault::empty(vec![recipient]);
+    vault
+        .add(Item::new("demo", "ada", "s3cret-value", ""))
+        .unwrap();
+    store(&practice.vault, &vault, &practice.trust()).unwrap();
+    drop(vault);
+
+    let sock = practice.dir.join("session.sock");
+    let child = practice
+        .command()
+        .arg("daemon")
+        .arg(&practice.vault)
+        .arg("-i")
+        .arg(&practice.identity)
+        .args(["--idle", "1"])
+        .env("KEYHOLE_SOCKET", &sock)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let daemon = DaemonGuard(child);
+
+    if !wait_for_session(&practice, &sock) {
+        panic!("daemon did not start\n{}", daemon.stderr());
+    }
+
+    let listed = client(&practice, &sock, &["names"]);
+    assert!(listed.status.success(), "{}", stderr(&listed));
+    assert_eq!(String::from_utf8(listed.stdout).unwrap().trim(), "demo");
+
+    let asked = client(&practice, &sock, &["ask", "demo"]);
+    assert!(asked.status.success(), "{}", stderr(&asked));
+    assert!(stderr(&asked).contains("username: ada"));
+    assert_eq!(
+        String::from_utf8(asked.stdout).unwrap().trim(),
+        "s3cret-value"
+    );
+
+    let mut saw_locked = false;
+    for _ in 0..40 {
+        let state = client(&practice, &sock, &["session"]);
+        if state.status.success() && String::from_utf8_lossy(&state.stdout).trim() == "locked" {
+            saw_locked = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(saw_locked, "idle lock did not drop the vault");
+
+    let refused = client(&practice, &sock, &["ask", "demo"]);
+    assert!(!refused.status.success());
+    assert!(stderr(&refused).contains("locked"));
+
+    let unlocked = client(&practice, &sock, &["unlock"]);
+    assert!(unlocked.status.success(), "{}", stderr(&unlocked));
+    let asked = client(&practice, &sock, &["ask", "demo"]);
+    assert_eq!(
+        String::from_utf8(asked.stdout).unwrap().trim(),
+        "s3cret-value"
+    );
+
+    let locked = client(&practice, &sock, &["lock"]);
+    assert!(locked.status.success(), "{}", stderr(&locked));
+    let state = client(&practice, &sock, &["session"]);
+    assert_eq!(String::from_utf8(state.stdout).unwrap().trim(), "locked");
+
+    let second = client(
+        &practice,
+        &sock,
+        &[
+            "daemon",
+            practice.vault.to_str().unwrap(),
+            "-i",
+            practice.identity.to_str().unwrap(),
+        ],
+    );
+    assert!(!second.status.success());
+    assert!(stderr(&second).contains("already listening"));
+
+    let err = daemon.stderr();
+    assert!(
+        !err.contains("s3cret-value"),
+        "daemon stderr contained the secret"
+    );
+}
+
+struct DaemonGuard(Child);
+
+impl DaemonGuard {
+    fn stderr(mut self) -> String {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+        let mut err = String::new();
+        if let Some(mut pipe) = self.0.stderr.take() {
+            let _ = pipe.read_to_string(&mut err);
+        }
+        err
+    }
+}
+
+impl Drop for DaemonGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn client(practice: &Practice, sock: &std::path::Path, args: &[&str]) -> std::process::Output {
+    practice
+        .command()
+        .env("KEYHOLE_SOCKET", sock)
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+fn stderr(output: &std::process::Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+fn wait_for_session(practice: &Practice, sock: &std::path::Path) -> bool {
+    for _ in 0..100 {
+        let state = client(practice, sock, &["session"]);
+        if state.status.success() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    false
 }

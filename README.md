@@ -56,7 +56,20 @@ A shelf stores age files and a version. It does not decrypt.
 ./target/release/keyhole serve /tmp/shelf 127.0.0.1:8787
 ```
 
-A second push must pass the version printed by the first push. `--base 0` again is a conflict. `pull` refuses a version older than this machine has seen, unless you pass `--accept-older`. `bash scripts/protect-highwater.sh` marks that memory append-only. `serve` prints the path of `write.token`. GET is open. PUT needs `Authorization: Bearer` and that token, plus `X-Keyhole-Signature`.
+A second push must pass the version printed by the first push. `--base 0` again is a conflict. The shelf keeps the newest five `vault.N.age` copies and deletes older ones, because a removed Bio can still open a copy from before rekey. `pull` refuses a version older than this machine has seen, unless you pass `--accept-older`. `bash scripts/protect-highwater.sh` marks that memory append-only. `serve` prints the path of `write.token`. GET is open. PUT needs `Authorization: Bearer` and that token, plus `X-Keyhole-Signature`.
+
+## Idle lock
+
+`daemon` decrypts the vault once and answers on a unix socket owned by you. It does not open a network port. `names` lists entries. `ask` shows one secret the same way `get` does. With no `names` or `ask` for the idle time, the process forgets the plaintext and keeps running. `unlock` reads the file again. `lock` forgets it now.
+
+```bash
+./target/release/keyhole daemon /dev/shm/vault.age -i /dev/shm/keyhole-identity.txt --idle 30
+./target/release/keyhole names
+./target/release/keyhole ask demo
+./target/release/keyhole lock
+```
+
+The socket is `$XDG_RUNTIME_DIR/keyhole/session.sock`, or `$KEYHOLE_SOCKET` when that is set. A program you run can still talk to it. The secret strings are locked in RAM so they are not written to swap. That does not hide them from your own programs, and it does not cover hibernation.
 
 ## Not in this version
 

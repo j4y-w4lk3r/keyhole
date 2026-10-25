@@ -11,10 +11,13 @@ Keyhole is one age file, unlocked on your machine. A shelf, when you use one, st
 flowchart TB
   subgraph yours ["Your machine"]
     cli["keyhole CLI"]
+    daemon["daemon on a unix socket"]
     ram["Unlocked vault, RAM only"]
     file["vault.age on disk"]
-    cli --> ram
     cli --> file
+    cli -->|"names and ask"| daemon
+    daemon --> ram
+    daemon -->|"reads again on unlock"| file
   end
 
   subgraph shelf ["Shelf, later a VPS"]
@@ -26,6 +29,8 @@ flowchart TB
   file -->|"push only if --base matches"| api
   api -->|"pull ciphertext and version"| file
 ```
+
+`keyhole get` still decrypts the file itself, then exits. `keyhole daemon` decrypts once and keeps that plaintext in the process. `names` and `ask` talk to it over a unix socket in `$XDG_RUNTIME_DIR/keyhole/session.sock` (or `$KEYHOLE_SOCKET`). The socket is mode 600. There is no TCP port. After 300 seconds with no `names` or `ask`, or when you run `lock`, the process drops the plaintext and stays up. `unlock` reads the file again. A program running as you can still connect.
 
 The operating system stores bytes and carries TCP. It does not know what a password is.
 HTTPS, when the shelf is on another computer, is ordinary TLS around those same bytes.
@@ -82,8 +87,10 @@ sequenceDiagram
 - **Argon2id and scrypt are the password KDFs to use.** There is not a stronger everyday replacement. More memory makes guessing harder until the unlock becomes unpleasant.
 - **Secrets are typed at a prompt.** They are not command arguments, and they are not log lines. Error text does not include an item, a password, or the identity contents.
 - **The process refuses three leaks.** Core dumps are off. `get` on a terminal uses the alternate screen and waits for Enter. The identity file must be mode 600 or 400, owned by you, and not a link.
-- **`age` and `gpg` are pinned.** Keyhole runs `/usr/bin/age` and `/usr/bin/gpg` only when their SHA-256 values match `age.pin` and `gpg.pin`. Those pins are compiled into the binary. An upgrade is `bash scripts/update-age-pin.sh` or `bash scripts/update-age-pin.sh gpg.pin`. The script asks for yes, rewrites the pin, and rebuilds.
-- **The shelf is not the trust.** A write to `serve` needs the token in `write.token`. This laptop appends the highest version it has seen and refuses an older one. `bash scripts/protect-highwater.sh` marks that directory append-only. A normal user cannot delete it or truncate a file the script has marked. Root can clear the flag. A vault opens only after a pinned OpenPGP key's signature checks, and only when every age recipient is pinned. The age header must contain the same number of X25519 stanzas as the vault lists. `rekey` is the explicit command that changes recipients.
+- **`age`, `gpg`, and the Bio plugin are pinned.** Keyhole runs `/usr/bin/age` and `/usr/bin/gpg` only when their SHA-256 values match `age.pin` and `gpg.pin`. A Bio identity also requires `age-plugin-fido2-hmac` to match `fido.pin`, and that directory is put first on `PATH` for the `age` process. Those pins are compiled into the binary. An upgrade is `bash scripts/update-age-pin.sh`, `bash scripts/update-age-pin.sh gpg.pin`, or `bash scripts/update-age-pin.sh fido.pin`. The script asks for yes, rewrites the pin, and rebuilds.
+- **An unlocked vault stays in RAM.** The decrypted bytes and the item strings are passed to `mlock`. The locked-memory limit is small, so the whole process is not locked. `mlock` does not hide the secret from another program you run, and it does not cover hibernation.
+- **The shelf keeps five revisions.** After a successful push, older than the newest five `vault.N.age` files, and their signatures, are deleted. Those older copies are still openable by a Bio that was removed later. Five is enough to undo a bad edit. Single files such as a trial vault are not a shelf, so this rule does not delete them.
+- **The shelf is not the trust.** A write to `serve` needs the token in `write.token`. This laptop appends the highest version it has seen and refuses an older one. `bash scripts/protect-highwater.sh` marks that directory append-only. A normal user cannot delete it or truncate a file the script has marked. Root can clear the flag. A vault opens only after a pinned OpenPGP key's signature checks. A signature made by a subkey is accepted when that subkey belongs to the pinned primary. `sign` uses your terminal so the Bio PIN prompt can open. Every age recipient must be pinned. The age header must contain the same number of X25519 stanzas as the vault lists. `rekey` is the explicit command that changes recipients.
 
 ## Where the shelf runs
 
@@ -93,4 +100,4 @@ PiKVM stores no vault secrets. The laptop's system disk encryption is a later ma
 
 ## Not built yet
 
-A daemon that locks on idle, then a browser extension that can ask for one confirmed origin. How many old `vault.N.age` copies to keep. `mlock`, so an unlocked vault is not written to swap.
+A browser extension that can ask this daemon for one confirmed origin. The page does not open the socket. The daemon does not hide its memory from another program you run.

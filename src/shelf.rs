@@ -109,7 +109,23 @@ impl Shelf {
         write_private(&version_tmp, format!("{next}\n").as_bytes())?;
         fs::rename(&version_tmp, self.dir.join("version"))
             .map_err(|e| format!("commit version: {e}"))?;
+        self.forget_old(next)?;
         Ok(next)
+    }
+
+    /// A removed Bio can still open a copy from before rekey. Keep the newest
+    /// five revisions and delete the older age files and their signatures.
+    fn forget_old(&self, newest: u64) -> Result<(), String> {
+        const KEEP: u64 = 5;
+        if newest <= KEEP {
+            return Ok(());
+        }
+        let oldest_kept = newest - KEEP + 1;
+        for version in 1..oldest_kept {
+            remove_if_present(&self.revision_path(version))?;
+            remove_if_present(&self.signature_path(version))?;
+        }
+        Ok(())
     }
 
     fn revision_path(&self, version: u64) -> PathBuf {
@@ -118,6 +134,14 @@ impl Shelf {
 
     fn signature_path(&self, version: u64) -> PathBuf {
         self.dir.join(format!("vault.{version}.age.sig"))
+    }
+}
+
+fn remove_if_present(path: &Path) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(format!("remove old {}: {err}", path.display())),
     }
 }
 
@@ -440,6 +464,21 @@ mod tests {
         let rev = shelf.fetch().unwrap().unwrap();
         assert_eq!(rev.version, 2);
         assert_eq!(rev.signature, b"sig");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_the_newest_five_revisions_remain() {
+        let dir = scratch("keep");
+        let shelf = Shelf::open(&dir).unwrap();
+        let body = b"age-encryption.org/v1\n-> test\n";
+        for version in 0..6 {
+            shelf.publish(version, body, b"sig").unwrap();
+        }
+        assert!(!dir.join("vault.1.age").exists());
+        assert!(!dir.join("vault.1.age.sig").exists());
+        assert!(dir.join("vault.2.age").exists());
+        assert!(dir.join("vault.6.age.sig").exists());
         let _ = fs::remove_dir_all(&dir);
     }
 

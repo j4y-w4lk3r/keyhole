@@ -44,6 +44,13 @@ impl Item {
     pub fn password(&self) -> &str {
         &self.password
     }
+
+    fn lock_memory(&self) -> Result<(), String> {
+        for field in [&self.name, &self.username, &self.password, &self.notes] {
+            crate::harden::lock_secret(field.as_bytes())?;
+        }
+        Ok(())
+    }
 }
 
 impl Vault {
@@ -98,6 +105,17 @@ impl Vault {
             return Err("vault has no recipients".into());
         }
         Ok(vault)
+    }
+
+    /// Lock the item strings so they are not written to swap.
+    pub fn lock_memory(&self) -> Result<(), String> {
+        for recipient in &self.recipients {
+            crate::harden::lock_secret(recipient.as_bytes())?;
+        }
+        for item in &self.items {
+            item.lock_memory()?;
+        }
+        Ok(())
     }
 
     pub fn to_plaintext(&self) -> Result<Vec<u8>, String> {

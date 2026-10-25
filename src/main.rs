@@ -44,6 +44,12 @@ fn run() -> Result<(), String> {
         "pull" => cmd_pull(args),
         "push" => cmd_push(args),
         "serve" => cmd_serve(args),
+        "daemon" => cmd_daemon(args),
+        "names" => cmd_names(args),
+        "ask" => cmd_ask(args),
+        "lock" => cmd_lock(args),
+        "unlock" => cmd_unlock(args),
+        "session" => cmd_session(args),
         "sign" => cmd_sign(args),
         "rekey" => cmd_rekey(args),
         "trust" => cmd_trust(args),
@@ -58,6 +64,7 @@ struct Flags {
     identity: Option<PathBuf>,
     base: Option<u64>,
     accept_older: bool,
+    idle: Option<u64>,
 }
 
 fn parse_flags(args: impl Iterator<Item = String>) -> Result<Flags, String> {
@@ -67,6 +74,7 @@ fn parse_flags(args: impl Iterator<Item = String>) -> Result<Flags, String> {
         identity: None,
         base: None,
         accept_older: false,
+        idle: None,
     };
     let mut args = args.peekable();
     while let Some(arg) = args.next() {
@@ -86,6 +94,10 @@ fn parse_flags(args: impl Iterator<Item = String>) -> Result<Flags, String> {
                 flags.base = Some(n.parse().map_err(|_| "--base needs a number")?);
             }
             "--accept-older" => flags.accept_older = true,
+            "--idle" => {
+                let n = args.next().ok_or("--idle needs a number of seconds")?;
+                flags.idle = Some(n.parse().map_err(|_| "--idle needs a number")?);
+            }
             "-h" | "--help" => return Err(help_text()),
             other if other.starts_with('-') => return Err(format!("unknown flag {other}")),
             other => flags.positional.push(other.to_string()),
@@ -94,8 +106,31 @@ fn parse_flags(args: impl Iterator<Item = String>) -> Result<Flags, String> {
     Ok(flags)
 }
 
+impl Flags {
+    fn no_idle(self) -> Result<Self, String> {
+        if self.idle.is_some() {
+            Err("--idle is only for daemon".into())
+        } else {
+            Ok(self)
+        }
+    }
+
+    fn daemon_only(self) -> Result<Self, String> {
+        if self.identity.is_some()
+            || !self.recipients.is_empty()
+            || self.base.is_some()
+            || self.accept_older
+            || self.idle.is_some()
+        {
+            Err("this command only talks to the running daemon".into())
+        } else {
+            Ok(self)
+        }
+    }
+}
+
 fn cmd_init(args: impl Iterator<Item = String>) -> Result<(), String> {
-    let flags = parse_flags(args)?;
+    let flags = parse_flags(args)?.no_idle()?;
     let [vault_path] = one_positional(&flags, "init VAULT -R RECIPIENT [-R RECIPIENT...]")?;
     if flags.recipients.is_empty() {
         return Err("init needs at least one -R recipient file".into());
@@ -114,7 +149,7 @@ fn cmd_init(args: impl Iterator<Item = String>) -> Result<(), String> {
 }
 
 fn cmd_list(args: impl Iterator<Item = String>) -> Result<(), String> {
-    let flags = parse_flags(args)?;
+    let flags = parse_flags(args)?.no_idle()?;
     let [vault_path] = one_positional(&flags, "list VAULT -i IDENTITY")?;
     let identity = flags.identity.as_deref().ok_or("list needs -i IDENTITY")?;
     let vault = load(identity, Path::new(vault_path), &open_trust()?)?;
@@ -125,7 +160,7 @@ fn cmd_list(args: impl Iterator<Item = String>) -> Result<(), String> {
 }
 
 fn cmd_add(args: impl Iterator<Item = String>) -> Result<(), String> {
-    let flags = parse_flags(args)?;
+    let flags = parse_flags(args)?.no_idle()?;
     let [vault_path, name] = two_positionals(&flags, "add VAULT -i IDENTITY NAME")?;
     let identity = flags.identity.as_deref().ok_or("add needs -i IDENTITY")?;
     let mut vault = load(identity, Path::new(vault_path), &open_trust()?)?;
@@ -144,7 +179,7 @@ fn cmd_add(args: impl Iterator<Item = String>) -> Result<(), String> {
 }
 
 fn cmd_pull(args: impl Iterator<Item = String>) -> Result<(), String> {
-    let flags = parse_flags(args)?;
+    let flags = parse_flags(args)?.no_idle()?;
     let [shelf_dir, dest] = two_positionals(&flags, "pull SHELF DEST [--accept-older]")?;
     let shelf = keyhole::shelf::Shelf::open(Path::new(shelf_dir))?;
     let Some(rev) = shelf.fetch()? else {
@@ -163,7 +198,7 @@ fn cmd_pull(args: impl Iterator<Item = String>) -> Result<(), String> {
 }
 
 fn cmd_push(args: impl Iterator<Item = String>) -> Result<(), String> {
-    let flags = parse_flags(args)?;
+    let flags = parse_flags(args)?.no_idle()?;
     let [shelf_dir, vault_path] = two_positionals(&flags, "push SHELF VAULT --base VERSION")?;
     let expected = flags
         .base
@@ -183,13 +218,13 @@ fn cmd_push(args: impl Iterator<Item = String>) -> Result<(), String> {
 }
 
 fn cmd_sign(args: impl Iterator<Item = String>) -> Result<(), String> {
-    let flags = parse_flags(args)?;
+    let flags = parse_flags(args)?.no_idle()?;
     let [vault_path] = one_positional(&flags, "sign VAULT")?;
     open_trust()?.sign(Path::new(vault_path))
 }
 
 fn cmd_rekey(args: impl Iterator<Item = String>) -> Result<(), String> {
-    let flags = parse_flags(args)?;
+    let flags = parse_flags(args)?.no_idle()?;
     let [vault_path] = one_positional(&flags, "rekey VAULT -i IDENTITY -R RECIPIENT")?;
     let identity = flags.identity.as_deref().ok_or("rekey needs -i IDENTITY")?;
     if flags.recipients.is_empty() {
@@ -256,8 +291,84 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
     std::fs::rename(&tmp, path).map_err(|e| format!("replace {}: {e}", path.display()))
 }
 
-fn cmd_serve(args: impl Iterator<Item = String>) -> Result<(), String> {
+fn cmd_daemon(args: impl Iterator<Item = String>) -> Result<(), String> {
     let flags = parse_flags(args)?;
+    let [vault_path] = one_positional(&flags, "daemon VAULT -i IDENTITY [--idle SECONDS]")?;
+    let identity = flags
+        .identity
+        .as_deref()
+        .ok_or("daemon needs -i IDENTITY")?;
+    let idle = flags.idle.unwrap_or(keyhole::session::DEFAULT_IDLE_SECS);
+    if idle == 0 {
+        return Err("--idle must be at least 1 second".into());
+    }
+    keyhole::session::serve(Path::new(vault_path), identity, idle)
+}
+
+fn cmd_names(args: impl Iterator<Item = String>) -> Result<(), String> {
+    let flags = parse_flags(args)?.daemon_only()?;
+    if !flags.positional.is_empty() {
+        return Err("usage: keyhole names".into());
+    }
+    for name in keyhole::session::names()? {
+        println!("{name}");
+    }
+    Ok(())
+}
+
+fn cmd_ask(args: impl Iterator<Item = String>) -> Result<(), String> {
+    let flags = parse_flags(args)?.daemon_only()?;
+    let [name] = one_positional(&flags, "ask NAME")?;
+    let asked = keyhole::session::ask(name)?;
+    match keyhole::reveal::secret_sink(io::stdout().is_terminal()) {
+        keyhole::reveal::SecretSink::Terminal => {
+            keyhole::reveal::reveal_on_terminal(&asked.username, &asked.password)
+        }
+        keyhole::reveal::SecretSink::Pipe => {
+            if !asked.username.is_empty() {
+                eprintln!("username: {}", asked.username);
+            }
+            println!("{}", asked.password);
+            Ok(())
+        }
+    }
+}
+
+fn cmd_lock(args: impl Iterator<Item = String>) -> Result<(), String> {
+    let flags = parse_flags(args)?.daemon_only()?;
+    if !flags.positional.is_empty() {
+        return Err("usage: keyhole lock".into());
+    }
+    keyhole::session::lock()?;
+    eprintln!("locked");
+    Ok(())
+}
+
+fn cmd_unlock(args: impl Iterator<Item = String>) -> Result<(), String> {
+    let flags = parse_flags(args)?.daemon_only()?;
+    if !flags.positional.is_empty() {
+        return Err("usage: keyhole unlock".into());
+    }
+    keyhole::session::unlock()?;
+    eprintln!("unlocked");
+    Ok(())
+}
+
+fn cmd_session(args: impl Iterator<Item = String>) -> Result<(), String> {
+    let flags = parse_flags(args)?.daemon_only()?;
+    if !flags.positional.is_empty() {
+        return Err("usage: keyhole session".into());
+    }
+    if keyhole::session::locked()? {
+        println!("locked");
+    } else {
+        println!("unlocked");
+    }
+    Ok(())
+}
+
+fn cmd_serve(args: impl Iterator<Item = String>) -> Result<(), String> {
+    let flags = parse_flags(args)?.no_idle()?;
     let [shelf_dir, addr] = two_positionals(&flags, "serve SHELF ADDR")?;
     keyhole::shelf::serve(Path::new(shelf_dir), addr)
 }
@@ -268,7 +379,7 @@ fn cmd_version(_args: impl Iterator<Item = String>) -> Result<(), String> {
 }
 
 fn cmd_get(args: impl Iterator<Item = String>) -> Result<(), String> {
-    let flags = parse_flags(args)?;
+    let flags = parse_flags(args)?.no_idle()?;
     let [vault_path, name] = two_positionals(&flags, "get VAULT -i IDENTITY NAME")?;
     let identity = flags.identity.as_deref().ok_or("get needs -i IDENTITY")?;
     let vault = load(identity, Path::new(vault_path), &open_trust()?)?;
@@ -344,14 +455,21 @@ keyhole — a local age vault
   keyhole pull SHELF DEST [--accept-older]
   keyhole push SHELF VAULT --base VERSION
   keyhole serve SHELF 127.0.0.1:8787
+  keyhole daemon VAULT -i IDENTITY [--idle SECONDS]
+  keyhole names
+  keyhole ask NAME
+  keyhole lock
+  keyhole unlock
+  keyhole session
   keyhole version
 
 The password is typed at the prompt. It is not an argument, so it stays out of shell history.
 list prints names. On a terminal, get shows the password on a screen that is discarded when you press Enter. When stdout is a pipe, get writes the password once and the username on stderr.
-A vault is opened only when its signature is from a pinned signer and every recipient is pinned.
-push is accepted only when --base is the shelf's current version. The first push uses --base 0.
+A vault is opened only when its signature is from a pinned signer, or from a subkey of that signer, and every recipient is pinned. sign uses your terminal so the Bio PIN prompt can open.
+push is accepted only when --base is the shelf's current version. The first push uses --base 0. The shelf then keeps the newest five revisions.
 pull refuses a version older than this machine has already seen, unless --accept-older is set.
 serve keeps its write token in SHELF/write.token. GET does not need it. PUT does.
+daemon decrypts once and answers names and ask on a unix socket owned by you. It is not a network port. After --idle seconds with no names or ask (300 by default) it forgets the vault and stays running. unlock reads the file again. lock forgets it now.
 "
     .into()
 }

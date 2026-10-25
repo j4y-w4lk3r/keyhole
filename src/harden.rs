@@ -43,6 +43,23 @@ pub fn owner_only_mode(mode: u32) -> bool {
     mode == 0o600 || mode == 0o400
 }
 
+/// Keep these bytes in RAM. The locked-memory limit is small, so this locks the
+/// secret strings, not the whole process. It does not hide them from another
+/// program you run, and it does not cover hibernation.
+pub fn lock_secret(bytes: &[u8]) -> Result<(), String> {
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    let rc = unsafe { libc::mlock(bytes.as_ptr() as *const libc::c_void, bytes.len()) };
+    if rc != 0 {
+        return Err(format!(
+            "could not lock secret memory ({})",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -59,6 +76,12 @@ mod tests {
         let rc = unsafe { libc::getrlimit(libc::RLIMIT_CORE, &mut limit) };
         assert_eq!(rc, 0);
         assert_eq!(limit.rlim_cur, 0);
+    }
+
+    #[test]
+    fn a_small_secret_can_be_locked() {
+        let secret = b"not-a-real-secret".to_vec();
+        lock_secret(&secret).unwrap();
     }
 
     #[test]

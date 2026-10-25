@@ -1,11 +1,11 @@
 //! Pinned signers and age recipients. This directory stays on the laptop.
 //! A signature is checked before age runs. rekey is the explicit way to change recipients.
 
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Command, Stdio};
 
 const AGE_HEADER: &[u8] = b"age-encryption.org/v1\n";
 
@@ -106,9 +106,11 @@ impl Trust {
         let fpr = self.signing_fingerprint()?;
         let sig_path = signature_path(age_path);
         let mut cmd = crate::gpgbin::gpg_command()?;
-        cmd.arg("--batch").arg("--yes");
+        cmd.arg("--yes");
         if let Some(home) = &self.keyring {
-            cmd.arg("--homedir").arg(home);
+            // Practice keys have an empty passphrase. --batch keeps the tests
+            // from opening a PIN window. A real Bio must be allowed to ask.
+            cmd.arg("--batch").arg("--homedir").arg(home);
         }
         cmd.arg("--detach-sign")
             .arg("--local-user")
@@ -116,9 +118,35 @@ impl Trust {
             .arg("--output")
             .arg(&sig_path)
             .arg(age_path)
-            .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit());
+        if self.keyring.is_some() {
+            cmd.stdin(Stdio::null());
+        } else {
+            let Some(tty) = controlling_tty() else {
+                return Err(
+                    "signing needs your terminal so the Bio PIN prompt can open. Run keyhole sign from that terminal."
+                        .into(),
+                );
+            };
+            cmd.env("GPG_TTY", &tty);
+            // The agent may still be holding a closed terminal from an earlier try.
+            let _ = Command::new("gpg-connect-agent")
+                .env("GPG_TTY", &tty)
+                .args(["updatestartuptty", "/bye"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            match File::open("/dev/tty") {
+                Ok(tty_file) => {
+                    cmd.stdin(Stdio::from(tty_file));
+                }
+                Err(_) => {
+                    cmd.stdin(Stdio::inherit());
+                }
+            }
+        }
         let status = cmd.status().map_err(|e| format!("run gpg sign: {e}"))?;
         if !status.success() {
             let _ = fs::remove_file(&sig_path);
@@ -173,16 +201,20 @@ impl Trust {
             .stderr(Stdio::piped());
         let output = cmd.output().map_err(|e| format!("run gpg verify: {e}"))?;
         let status = String::from_utf8_lossy(&output.stdout);
-        let Some(fpr) = validsig_fingerprint(&status) else {
+        let Some(sig) = validsig(&status) else {
             return Err("signature rejected".into());
         };
         if !output.status.success() {
             return Err("signature rejected".into());
         }
         let allowed = self.signers()?;
-        if !allowed.iter().any(|item| item.eq_ignore_ascii_case(&fpr)) {
+        let pinned = sig
+            .fingerprints()
+            .any(|fpr| allowed.iter().any(|item| item.eq_ignore_ascii_case(fpr)));
+        if !pinned {
             return Err(format!(
-                "signature is from {fpr}, which is not a pinned signer"
+                "signature is from {}, which is not a pinned signer",
+                sig.describe()
             ));
         }
         Ok(())
@@ -258,6 +290,17 @@ pub fn signature_path(age_path: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// The terminal this process was started in, if it is a real one.
+fn controlling_tty() -> Option<PathBuf> {
+    let path = fs::read_link("/proc/self/fd/0").ok()?;
+    let text = path.to_string_lossy();
+    if text.starts_with("/dev/pts/") || text.starts_with("/dev/tty") {
+        Some(path)
+    } else {
+        None
+    }
+}
+
 fn normalize_fpr(fingerprint: &str) -> Result<String, String> {
     let fpr: String = fingerprint
         .chars()
@@ -276,16 +319,50 @@ fn valid_recipient(recipient: &str) -> bool {
         && recipient.chars().all(|c| c.is_ascii_graphic())
 }
 
-fn validsig_fingerprint(status: &str) -> Option<String> {
-    for line in status.lines() {
-        if let Some(rest) = line.strip_prefix("[GNUPG:] VALIDSIG ") {
-            return rest
-                .split_whitespace()
-                .next()
-                .map(|fpr| fpr.to_ascii_uppercase());
+struct ValidSig {
+    /// Fingerprint of the key that produced the signature. A Bio signs with a subkey.
+    signing: String,
+    /// Primary key that owns that subkey, when GnuPG reports it.
+    primary: Option<String>,
+}
+
+impl ValidSig {
+    fn fingerprints(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.signing.as_str()).chain(self.primary.as_deref())
+    }
+
+    fn describe(&self) -> String {
+        match &self.primary {
+            Some(primary) if primary != &self.signing => {
+                format!("{primary} (subkey {})", self.signing)
+            }
+            _ => self.signing.clone(),
         }
     }
+}
+
+fn validsig(status: &str) -> Option<ValidSig> {
+    for line in status.lines() {
+        let Some(rest) = line.strip_prefix("[GNUPG:] VALIDSIG ") else {
+            continue;
+        };
+        let fields: Vec<&str> = rest.split_whitespace().collect();
+        let signing = fields.first()?.to_ascii_uppercase();
+        if !fingerprint_hex(&signing) {
+            return None;
+        }
+        // GnuPG puts the primary fingerprint in the 10th field.
+        let primary = fields
+            .get(9)
+            .map(|field| field.to_ascii_uppercase())
+            .filter(|field| fingerprint_hex(field));
+        return Some(ValidSig { signing, primary });
+    }
     None
+}
+
+fn fingerprint_hex(fpr: &str) -> bool {
+    (fpr.len() == 40 || fpr.len() == 64) && fpr.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 fn read_lines(path: &Path) -> Result<Vec<String>, String> {
@@ -343,5 +420,20 @@ mod tests {
     fn rejects_a_short_fingerprint() {
         let err = normalize_fpr("abc").unwrap_err();
         assert!(err.contains("40 or 64"), "{err}");
+    }
+
+    #[test]
+    fn a_subkey_signature_also_names_the_primary() {
+        let status = "[GNUPG:] VALIDSIG A811D80289ED5FFDFC18EFF0831B58B1435489BC 2026-10-24 1792861271 0 4 0 1 10 00 E7702AAF1FEE076958B66C15E5712AFC8C6E18D6";
+        let sig = validsig(status).unwrap();
+        assert_eq!(sig.signing, "A811D80289ED5FFDFC18EFF0831B58B1435489BC");
+        assert_eq!(
+            sig.primary.as_deref(),
+            Some("E7702AAF1FEE076958B66C15E5712AFC8C6E18D6")
+        );
+        assert!(
+            sig.fingerprints()
+                .any(|fpr| fpr == "E7702AAF1FEE076958B66C15E5712AFC8C6E18D6")
+        );
     }
 }

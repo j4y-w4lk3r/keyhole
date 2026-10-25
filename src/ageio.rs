@@ -40,7 +40,9 @@ pub fn decrypt_bytes(identity: &Path, age_bytes: &[u8]) -> Result<Vec<u8>, Strin
 }
 
 fn decrypt_path(identity: &Path, vault: &Path) -> Result<Vec<u8>, String> {
-    let output = crate::agebin::age_command()?
+    let mut cmd = crate::agebin::age_command()?;
+    crate::fido::prepare(&mut cmd, identity)?;
+    let output = cmd
         .arg("-d")
         .arg("-i")
         .arg(identity)

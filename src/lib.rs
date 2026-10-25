@@ -4,10 +4,12 @@
 pub mod agebin;
 pub mod ageio;
 pub mod b64;
+pub mod fido;
 pub mod gpgbin;
 pub mod harden;
 pub mod highwater;
 pub mod reveal;
+pub mod session;
 pub mod shelf;
 pub mod state;
 pub mod trust;
@@ -30,6 +32,10 @@ pub fn load(
         .map_err(|_| "vault has no signature".to_string())?;
     trust.verify_detached(&age_bytes, &signature)?;
     let mut bytes = ageio::decrypt_bytes(identity, &age_bytes)?;
+    if let Err(err) = harden::lock_secret(&bytes) {
+        bytes.zeroize();
+        return Err(err);
+    }
     let stanzas = ageio::x25519_stanza_count(&age_bytes)?;
     let parsed = vault::Vault::from_plaintext(&bytes);
     bytes.zeroize();
@@ -41,6 +47,7 @@ pub fn load(
         );
     }
     trust.check_recipients(vault.recipients())?;
+    vault.lock_memory()?;
     Ok(vault)
 }
 

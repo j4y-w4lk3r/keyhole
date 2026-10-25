@@ -2,6 +2,7 @@
 # Trust the binary named in a pin file, then rebuild keyhole.
 #   bash scripts/update-age-pin.sh          # age.pin
 #   bash scripts/update-age-pin.sh gpg.pin  # gpg.pin
+#   bash scripts/update-age-pin.sh fido.pin # the Bio plugin age runs
 # Run this yourself after an upgrade. It is not a package hook:
 # a hook would bless whatever file appeared at that path.
 
@@ -10,7 +11,7 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 name="${1:-age.pin}"
 if [[ "$name" == */* ]]; then
-  echo "pass a pin file name in the repo root, such as age.pin or gpg.pin" >&2
+  echo "pass a pin file name in the repo root, such as age.pin, gpg.pin, or fido.pin" >&2
   exit 1
 fi
 pin="$root/$name"

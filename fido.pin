@@ -1,0 +1,5 @@
+# Absolute path, then the SHA-256 of that file.
+# age runs this plugin when the identity is a Bio. It sees the unwrapped file key.
+# Change this only when you mean to trust a new plugin binary.
+/home/j4y/.local/bin/age-plugin-fido2-hmac
+89821f7c88af9d097173ce08efc1754e7020b5920cd125f1aacd52f4848aa9fe
