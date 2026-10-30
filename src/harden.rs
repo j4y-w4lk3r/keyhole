@@ -18,6 +18,23 @@ pub fn disable_core_dumps() -> Result<(), String> {
     }
 }
 
+/// Stop other programs running as this user from reading this process's memory.
+pub fn deny_memory_readers() -> Result<(), String> {
+    let rc = unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) };
+    if rc != 0 {
+        Err("could not protect this process's memory".into())
+    } else {
+        Ok(())
+    }
+}
+
+/// A parent that ignores SIGCHLD passes that on, and then waiting for a child fails.
+pub fn restore_child_signal() {
+    unsafe {
+        libc::signal(libc::SIGCHLD, libc::SIG_DFL);
+    }
+}
+
 /// The identity is a regular file, owned by this user, mode 600 or 400.
 /// Symlinks are refused so the mode check cannot be pointed at some other file.
 pub fn check_identity(path: &Path) -> Result<(), String> {

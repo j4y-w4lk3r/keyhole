@@ -431,6 +431,252 @@ fn daemon_locks_when_idle_and_unlock_reads_again() {
     );
 }
 
+#[test]
+fn the_policy_limits_who_can_ask_and_the_daemon_hides_its_memory() {
+    let practice = Practice::new("policy");
+    let recipient = fs::read_to_string(&practice.recipient_file)
+        .unwrap()
+        .trim()
+        .to_string();
+    let mut vault = Vault::empty(vec![recipient]);
+    for name in ["mine", "theirs", "open"] {
+        vault
+            .add(Item::new(name, "ada", format!("{name}-value"), ""))
+            .unwrap();
+    }
+    store(&practice.vault, &vault, &practice.trust()).unwrap();
+    drop(vault);
+
+    let own_cgroup = fs::read_to_string("/proc/self/cgroup").unwrap();
+    let own_cgroup = own_cgroup
+        .lines()
+        .find_map(|line| line.strip_prefix("0::"))
+        .unwrap()
+        .to_string();
+    let policy_dir = practice.dir.join("policy-dir");
+    fs::create_dir_all(&policy_dir).unwrap();
+    fs::set_permissions(&policy_dir, fs::Permissions::from_mode(0o755)).unwrap();
+    let policy = policy_dir.join("policy");
+    fs::write(
+        &policy,
+        format!("mine {own_cgroup}\ntheirs /system.slice/keychord.service\n"),
+    )
+    .unwrap();
+    fs::set_permissions(&policy, fs::Permissions::from_mode(0o644)).unwrap();
+
+    let sock = practice.dir.join("session.sock");
+    let child = practice
+        .command()
+        .arg("daemon")
+        .arg(&practice.vault)
+        .arg("-i")
+        .arg(&practice.identity)
+        .env("KEYHOLE_SOCKET", &sock)
+        .env("KEYHOLE_POLICY", &policy)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let daemon_pid = child.id();
+    let daemon = DaemonGuard(child);
+    if !wait_for_session(&practice, &sock) {
+        panic!("daemon did not start\n{}", daemon.stderr());
+    }
+
+    // This test is the daemon's parent, so only the daemon's own setting can stop it.
+    assert!(
+        fs::File::open(format!("/proc/{daemon_pid}/mem")).is_err(),
+        "daemon memory is readable by this user"
+    );
+
+    let mine = client(&practice, &sock, &["ask", "mine"]);
+    assert!(mine.status.success(), "{}", stderr(&mine));
+    assert_eq!(String::from_utf8_lossy(&mine.stdout).trim(), "mine-value");
+
+    let open = client(&practice, &sock, &["ask", "open"]);
+    assert_eq!(String::from_utf8_lossy(&open.stdout).trim(), "open-value");
+
+    let theirs = client(&practice, &sock, &["ask", "theirs"]);
+    assert!(!theirs.status.success());
+    assert!(stderr(&theirs).contains("may not read"));
+    assert!(!String::from_utf8_lossy(&theirs.stdout).contains("theirs-value"));
+
+    fs::write(&policy, "broken line here\n").unwrap();
+    let broken = client(&practice, &sock, &["ask", "mine"]);
+    assert!(!broken.status.success());
+
+    fs::write(&policy, format!("mine {own_cgroup}\n")).unwrap();
+    fs::set_permissions(&policy, fs::Permissions::from_mode(0o666)).unwrap();
+    let writable = client(&practice, &sock, &["ask", "mine"]);
+    assert!(!writable.status.success());
+    assert!(stderr(&writable).contains("writable"));
+
+    let err = daemon.stderr();
+    assert!(err.contains("refused"), "{err}");
+    assert!(!err.contains("-value"), "daemon stderr contained a secret");
+}
+
+/// Needs systemd and passwordless sudo: cargo test -- --ignored real_system_service
+#[test]
+#[ignore]
+fn only_the_real_system_service_passes_the_policy() {
+    let practice = Practice::new("service");
+    let recipient = fs::read_to_string(&practice.recipient_file)
+        .unwrap()
+        .trim()
+        .to_string();
+    let mut vault = Vault::empty(vec![recipient]);
+    vault
+        .add(Item::new("demo", "ada", "s3cret-value", ""))
+        .unwrap();
+    store(&practice.vault, &vault, &practice.trust()).unwrap();
+    drop(vault);
+
+    let policy_dir = practice.dir.join("policy-dir");
+    fs::create_dir_all(&policy_dir).unwrap();
+    fs::set_permissions(&policy_dir, fs::Permissions::from_mode(0o755)).unwrap();
+    let policy = policy_dir.join("policy");
+    let unit = format!("keyhole-test-{}", std::process::id());
+    fs::write(&policy, format!("demo /system.slice/{unit}.service\n")).unwrap();
+    fs::set_permissions(&policy, fs::Permissions::from_mode(0o644)).unwrap();
+    fs::set_permissions(&practice.dir, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let sock = practice.dir.join("session.sock");
+    let child = practice
+        .command()
+        .arg("daemon")
+        .arg(&practice.vault)
+        .arg("-i")
+        .arg(&practice.identity)
+        .env("KEYHOLE_SOCKET", &sock)
+        .env("KEYHOLE_POLICY", &policy)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let daemon = DaemonGuard(child);
+    if !wait_for_session(&practice, &sock) {
+        panic!("daemon did not start\n{}", daemon.stderr());
+    }
+
+    let uid = unsafe { libc::geteuid() }.to_string();
+    let in_system_unit = |name: &str| {
+        Command::new("sudo")
+            .args(["-n", "systemd-run", "--wait", "--pipe", "--quiet"])
+            .arg(format!("--unit={name}"))
+            .arg(format!("--uid={uid}"))
+            .arg(format!("--setenv=KEYHOLE_SOCKET={}", sock.display()))
+            .arg(env!("CARGO_BIN_EXE_keyhole"))
+            .args(["ask", "demo"])
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+
+    let allowed = in_system_unit(&unit);
+    assert!(allowed.status.success(), "{}", stderr(&allowed));
+    assert!(String::from_utf8_lossy(&allowed.stdout).contains("s3cret-value"));
+
+    let other = in_system_unit(&format!("{unit}-other"));
+    assert!(!other.status.success());
+    assert!(!String::from_utf8_lossy(&other.stdout).contains("s3cret-value"));
+
+    let same_name_as_user = Command::new("systemd-run")
+        .args(["--user", "--wait", "--pipe", "--quiet"])
+        .arg(format!("--unit={unit}"))
+        .arg(format!("--setenv=KEYHOLE_SOCKET={}", sock.display()))
+        .arg(env!("CARGO_BIN_EXE_keyhole"))
+        .args(["ask", "demo"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!same_name_as_user.status.success());
+    assert!(!String::from_utf8_lossy(&same_name_as_user.stdout).contains("s3cret-value"));
+
+    let plain = client(&practice, &sock, &["ask", "demo"]);
+    assert!(!plain.status.success());
+    assert!(!String::from_utf8_lossy(&plain.stdout).contains("s3cret-value"));
+
+    let err = daemon.stderr();
+    assert_eq!(err.matches("refused").count(), 3, "{err}");
+}
+
+#[test]
+fn type_sends_the_secret_to_wtype_and_then_enter() {
+    let practice = Practice::new("type");
+    let recipient = fs::read_to_string(&practice.recipient_file)
+        .unwrap()
+        .trim()
+        .to_string();
+    let mut vault = Vault::empty(vec![recipient]);
+    vault
+        .add(Item::new("demo", "ada", "s3cret-value", ""))
+        .unwrap();
+    store(&practice.vault, &vault, &practice.trust()).unwrap();
+    drop(vault);
+
+    let typed = practice.dir.join("typed");
+    let keys = practice.dir.join("keys");
+    let fake = practice.dir.join("fake-wtype");
+    fs::write(
+        &fake,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = - ]; then cat > {}; else echo \"$@\" >> {}; fi\n",
+            typed.display(),
+            keys.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let sock = practice.dir.join("session.sock");
+    let child = practice
+        .command()
+        .arg("daemon")
+        .arg(&practice.vault)
+        .arg("-i")
+        .arg(&practice.identity)
+        .env("KEYHOLE_SOCKET", &sock)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let daemon = DaemonGuard(child);
+    if !wait_for_session(&practice, &sock) {
+        panic!("daemon did not start\n{}", daemon.stderr());
+    }
+
+    // keychord ignores SIGCHLD, and its children inherit that.
+    let output = practice
+        .command()
+        .env("KEYHOLE_SOCKET", &sock)
+        .env("KEYHOLE_WTYPE", &fake)
+        .args(["type", "demo"])
+        .output_ignoring_children();
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(output.stdout.is_empty());
+    assert!(!stderr(&output).contains("s3cret-value"));
+    assert_eq!(fs::read_to_string(&typed).unwrap(), "s3cret-value");
+    assert_eq!(fs::read_to_string(&keys).unwrap().trim(), "-k Return");
+}
+
+trait IgnoringChildren {
+    fn output_ignoring_children(&mut self) -> std::process::Output;
+}
+
+impl IgnoringChildren for Command {
+    fn output_ignoring_children(&mut self) -> std::process::Output {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            self.pre_exec(|| {
+                libc::signal(libc::SIGCHLD, libc::SIG_IGN);
+                Ok(())
+            });
+        }
+        self.output().unwrap()
+    }
+}
+
 struct DaemonGuard(Child);
 
 impl DaemonGuard {

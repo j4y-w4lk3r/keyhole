@@ -4,9 +4,10 @@
 use std::fs;
 use std::io::{self, Read, Write};
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::io::AsRawFd;
+use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -19,6 +20,21 @@ use crate::trust::Trust;
 use crate::vault::Vault;
 
 pub const DEFAULT_IDLE_SECS: u64 = 300;
+
+// Linux 6.5. Not every libc crate version names it.
+const SO_PEERPIDFD: libc::c_int = 77;
+
+// Root-owned, mode 711. A program its user cannot read gets the same memory protection.
+const WTYPE_PATH: &str = "/usr/local/lib/keyhole/wtype";
+
+pub fn wtype_path() -> PathBuf {
+    if cfg!(debug_assertions) {
+        if let Some(path) = std::env::var_os("KEYHOLE_WTYPE") {
+            return PathBuf::from(path);
+        }
+    }
+    PathBuf::from(WTYPE_PATH)
+}
 
 pub fn socket_path() -> Result<PathBuf, String> {
     if let Some(path) = std::env::var_os("KEYHOLE_SOCKET") {
@@ -37,6 +53,7 @@ pub fn serve(vault_path: &Path, identity: &Path, idle_secs: u64) -> Result<(), S
     if idle_secs == 0 {
         return Err("idle time must be at least 1 second".into());
     }
+    crate::harden::deny_memory_readers()?;
     let path = socket_path()?;
     ensure_free(&path)?;
     let vault_path = fs::canonicalize(vault_path)
@@ -81,10 +98,13 @@ pub fn serve(vault_path: &Path, identity: &Path, idle_secs: u64) -> Result<(), S
             }
         };
         let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-        if let Err(err) = same_user(&stream) {
-            let _ = write_all(&mut stream, &error_line(&err));
-            continue;
-        }
+        let pid = match same_user(&stream) {
+            Ok(pid) => pid,
+            Err(err) => {
+                let _ = write_all(&mut stream, &error_line(&err));
+                continue;
+            }
+        };
         let line = match read_line(&mut stream) {
             Ok(line) => line,
             Err(_) => continue,
@@ -96,6 +116,11 @@ pub fn serve(vault_path: &Path, identity: &Path, idle_secs: u64) -> Result<(), S
                 continue;
             }
         };
+        if let Err(err) = authorize(&request, &stream, pid) {
+            report_refusal(&request, pid, &err);
+            let _ = write_all(&mut stream, &error_line(&err));
+            continue;
+        }
         let mut bytes = {
             let mut session = match state.lock() {
                 Ok(guard) => guard,
@@ -338,7 +363,90 @@ fn read_line(stream: &mut UnixStream) -> Result<String, String> {
     String::from_utf8(buf).map_err(|_| "request is not utf-8".into())
 }
 
-fn same_user(stream: &UnixStream) -> Result<(), String> {
+/// An entry listed in the policy is only for the cgroups listed with it.
+fn authorize(request: &Request, stream: &UnixStream, pid: i32) -> Result<(), String> {
+    if request.op != "ask" {
+        return Ok(());
+    }
+    let Some(name) = request.name.as_deref() else {
+        return Ok(());
+    };
+    let policy = crate::policy::load()?;
+    if !policy.restricts(name) {
+        return Ok(());
+    }
+    let pidfd = peer_pidfd(stream)?;
+    let cgroup = crate::policy::cgroup_of(pid)?;
+    if !pid_is_alive(&pidfd) {
+        return Err("client exited before it could be checked".into());
+    }
+    if !policy.allows(name, &cgroup) {
+        return Err(format!("this program may not read '{name}'"));
+    }
+    Ok(())
+}
+
+/// Log and notify, because the refused program will not tell anyone.
+fn report_refusal(request: &Request, pid: i32, reason: &str) {
+    let name = request.name.as_deref().unwrap_or("?");
+    let comm: String = fs::read_to_string(format!("/proc/{pid}/comm"))
+        .unwrap_or_default()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || "-_.".contains(*c))
+        .collect();
+    let message = format!("refused {comm} (pid {pid}): {reason}");
+    eprintln!("keyhole: {message}");
+    let quiet = |program: &str, args: &[&str]| {
+        let _ = Command::new(program)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    };
+    let body = format!("{message} [{name}]");
+    thread::spawn(move || {
+        quiet("/usr/bin/logger", &["-t", "keyhole", "--", &body]);
+        quiet(
+            "/usr/bin/notify-send",
+            &["-a", "keyhole", "-u", "critical", "--", "keyhole", &body],
+        );
+    });
+}
+
+/// The pidfd names the process that connected, so a reused pid cannot pass the check.
+fn peer_pidfd(stream: &UnixStream) -> Result<OwnedFd, String> {
+    let mut fd: libc::c_int = -1;
+    let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    let rc = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            SO_PEERPIDFD,
+            &mut fd as *mut libc::c_int as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    if rc != 0 || fd < 0 {
+        return Err("could not identify the client".into());
+    }
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+fn pid_is_alive(pidfd: &OwnedFd) -> bool {
+    let rc = unsafe {
+        libc::syscall(
+            libc::SYS_pidfd_send_signal,
+            pidfd.as_raw_fd(),
+            0,
+            std::ptr::null::<libc::siginfo_t>(),
+            0,
+        )
+    };
+    rc == 0
+}
+
+fn same_user(stream: &UnixStream) -> Result<i32, String> {
     let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
     let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
     let rc = unsafe {
@@ -357,7 +465,7 @@ fn same_user(stream: &UnixStream) -> Result<(), String> {
     if cred.uid != euid {
         return Err("refusing a client that is not you".into());
     }
-    Ok(())
+    Ok(cred.pid)
 }
 
 fn ensure_free(path: &Path) -> Result<(), String> {

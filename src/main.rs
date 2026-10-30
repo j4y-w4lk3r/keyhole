@@ -4,7 +4,7 @@ use std::env;
 use std::io::{self, IsTerminal, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{Command, ExitCode, Stdio};
 
 use keyhole::highwater::HighWater;
 use keyhole::trust::Trust;
@@ -47,6 +47,7 @@ fn run() -> Result<(), String> {
         "daemon" => cmd_daemon(args),
         "names" => cmd_names(args),
         "ask" => cmd_ask(args),
+        "type" => cmd_type(args),
         "lock" => cmd_lock(args),
         "unlock" => cmd_unlock(args),
         "session" => cmd_session(args),
@@ -316,6 +317,45 @@ fn cmd_names(args: impl Iterator<Item = String>) -> Result<(), String> {
     Ok(())
 }
 
+/// Type an entry into the focused window, then Enter. The secret goes straight to
+/// wtype. Installed unreadable, wtype is protected from other programs like this one.
+fn cmd_type(args: impl Iterator<Item = String>) -> Result<(), String> {
+    let flags = parse_flags(args)?.daemon_only()?;
+    let [name] = one_positional(&flags, "type NAME")?;
+    keyhole::harden::restore_child_signal();
+    keyhole::harden::deny_memory_readers()?;
+    let asked = keyhole::session::ask(name)?;
+    let wtype = keyhole::session::wtype_path();
+    let mut child = Command::new(&wtype)
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("start {}: {e}", wtype.display()))?;
+    let mut stdin = child.stdin.take().ok_or("wtype has no input")?;
+    for part in asked.password.split('\n') {
+        stdin
+            .write_all(part.as_bytes())
+            .map_err(|e| format!("send to wtype: {e}"))?;
+    }
+    drop(stdin);
+    let typed = child.wait().map_err(|e| format!("wtype: {e}"))?;
+    if !typed.success() {
+        return Err("wtype could not type".into());
+    }
+    let enter = Command::new(&wtype)
+        .args(["-k", "Return"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| format!("wtype: {e}"))?;
+    if !enter.success() {
+        return Err("wtype could not press Enter".into());
+    }
+    Ok(())
+}
+
 fn cmd_ask(args: impl Iterator<Item = String>) -> Result<(), String> {
     let flags = parse_flags(args)?.daemon_only()?;
     let [name] = one_positional(&flags, "ask NAME")?;
@@ -458,6 +498,7 @@ keyhole — a local age vault
   keyhole daemon VAULT -i IDENTITY [--idle SECONDS]
   keyhole names
   keyhole ask NAME
+  keyhole type NAME
   keyhole lock
   keyhole unlock
   keyhole session

@@ -8,6 +8,7 @@ pub mod fido;
 pub mod gpgbin;
 pub mod harden;
 pub mod highwater;
+pub mod policy;
 pub mod reveal;
 pub mod session;
 pub mod shelf;

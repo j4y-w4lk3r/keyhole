@@ -69,7 +69,19 @@ A second push must pass the version printed by the first push. `--base 0` again 
 ./target/release/keyhole lock
 ```
 
-The socket is `$XDG_RUNTIME_DIR/keyhole/session.sock`, or `$KEYHOLE_SOCKET` when that is set. A program you run can still talk to it. The secret strings are locked in RAM so they are not written to swap. That does not hide them from your own programs, and it does not cover hibernation.
+The socket is `$XDG_RUNTIME_DIR/keyhole/session.sock`, or `$KEYHOLE_SOCKET` when that is set. A program you run can still talk to it, and can read any entry not named in the policy below. The secret strings are locked in RAM so they are not written to swap. That does not hide them from your own programs, and it does not cover hibernation.
+
+## Limit an entry to one service
+
+`/etc/keyhole/policy` lists which cgroups may `ask` for an entry, one `ENTRY CGROUP` per line. It must be owned by root and not writable by others, and so must its folder. A file that fails those checks, or does not parse, refuses every `ask`. An entry with no line stays open. A refusal goes to the system log and to a desktop notification.
+
+```
+demo /system.slice/keychord.service
+```
+
+A program running as you cannot join a system service's cgroup, but it can edit whatever that service runs if the files are yours. Keep the binary, the script, and its settings root-owned. Root gets past all of this. So can `keyhole get`, which still needs your key.
+
+`keyhole type NAME` types an entry into the focused window and presses Enter, with no shell pipe. Install wtype for it as `/usr/local/lib/keyhole/wtype`, owned by root, mode 711. The kernel then stops other programs running as you from opening its input through `/proc`.
 
 ## Not in this version
 
