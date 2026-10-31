@@ -99,12 +99,25 @@ impl Trust {
     }
 
     pub fn sign(&self, age_path: &Path) -> Result<(), String> {
+        let sig_path = signature_path(age_path);
+        let mut tmp = sig_path.clone().into_os_string();
+        tmp.push(".tmp");
+        let tmp = PathBuf::from(tmp);
+        self.sign_to(age_path, &tmp)?;
+        fs::rename(&tmp, &sig_path).map_err(|e| {
+            let _ = fs::remove_file(&tmp);
+            format!("replace {}: {e}", sig_path.display())
+        })
+    }
+
+    /// Sign `age_path` into `sig_path`. A failure leaves nothing at `sig_path`,
+    /// so pass a temporary path when a signature you want to keep lives elsewhere.
+    pub fn sign_to(&self, age_path: &Path, sig_path: &Path) -> Result<(), String> {
         let bytes = fs::read(age_path).map_err(|e| format!("read {}: {e}", age_path.display()))?;
         if !bytes.starts_with(AGE_HEADER) {
             return Err("refusing to sign a file that is not age ciphertext".into());
         }
         let fpr = self.signing_fingerprint()?;
-        let sig_path = signature_path(age_path);
         let mut cmd = crate::gpgbin::gpg_command()?;
         cmd.arg("--yes");
         if let Some(home) = &self.keyring {
@@ -116,7 +129,7 @@ impl Trust {
             .arg("--local-user")
             .arg(&fpr)
             .arg("--output")
-            .arg(&sig_path)
+            .arg(sig_path)
             .arg(age_path)
             .stdout(Stdio::null())
             .stderr(Stdio::inherit());
@@ -149,10 +162,10 @@ impl Trust {
         }
         let status = cmd.status().map_err(|e| format!("run gpg sign: {e}"))?;
         if !status.success() {
-            let _ = fs::remove_file(&sig_path);
+            let _ = fs::remove_file(sig_path);
             return Err("gpg sign failed".into());
         }
-        fs::set_permissions(&sig_path, fs::Permissions::from_mode(0o600))
+        fs::set_permissions(sig_path, fs::Permissions::from_mode(0o600))
             .map_err(|e| format!("chmod {}: {e}", sig_path.display()))?;
         Ok(())
     }

@@ -791,3 +791,29 @@ fn wait_for_session(practice: &Practice, sock: &std::path::Path) -> bool {
     }
     false
 }
+
+#[test]
+fn a_failed_signature_leaves_the_vault_and_its_signature_alone() {
+    let practice = Practice::new("failed-sign");
+    let recipient = fs::read_to_string(&practice.recipient_file)
+        .unwrap()
+        .trim()
+        .to_string();
+    let vault = Vault::empty(vec![recipient]);
+    store(&practice.vault, &vault, &practice.trust()).unwrap();
+    let sig = keyhole::trust::signature_path(&practice.vault);
+    let before = (fs::read(&practice.vault).unwrap(), fs::read(&sig).unwrap());
+
+    let _ = Command::new("/usr/bin/gpgconf")
+        .arg("--homedir")
+        .arg(&practice.gpg)
+        .args(["--kill", "gpg-agent"])
+        .status();
+    fs::remove_dir_all(practice.gpg.join("private-keys-v1.d")).unwrap();
+
+    assert!(store(&practice.vault, &vault, &practice.trust()).is_err());
+    assert_eq!(fs::read(&practice.vault).unwrap(), before.0);
+    assert_eq!(fs::read(&sig).unwrap(), before.1);
+    assert!(!practice.dir.join("vault.age.tmp").exists());
+    assert!(!practice.dir.join("vault.age.tmp.sig").exists());
+}

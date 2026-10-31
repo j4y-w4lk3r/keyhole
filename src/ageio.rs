@@ -59,11 +59,13 @@ fn decrypt_path(identity: &Path, vault: &Path) -> Result<Vec<u8>, String> {
 }
 
 /// Encrypt to a temp file next to `destination`, then rename over it.
-pub fn encrypt_replacing(
+/// Encrypt beside `destination` and return the new file. The caller moves it
+/// into place once it is signed, so a failed signature changes nothing.
+pub fn encrypt_beside(
     recipients: &[String],
     plaintext: &[u8],
     destination: &Path,
-) -> Result<(), String> {
+) -> Result<PathBuf, String> {
     if recipients.is_empty() {
         return Err("vault has no recipients".into());
     }
@@ -72,8 +74,7 @@ pub fn encrypt_replacing(
     encrypt_to(recipients, plaintext, &tmp)?;
     let perms = fs::Permissions::from_mode(0o600);
     fs::set_permissions(&tmp, perms).map_err(|e| format!("chmod {}: {e}", tmp.display()))?;
-    fs::rename(&tmp, destination).map_err(|e| format!("replace {}: {e}", destination.display()))?;
-    Ok(())
+    Ok(tmp)
 }
 
 fn encrypt_to(recipients: &[String], plaintext: &[u8], destination: &Path) -> Result<(), String> {

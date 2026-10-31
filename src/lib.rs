@@ -16,6 +16,7 @@ pub mod state;
 pub mod trust;
 pub mod vault;
 
+use std::fs;
 use std::path::Path;
 
 use zeroize::Zeroize;
@@ -52,12 +53,23 @@ pub fn load(
     Ok(vault)
 }
 
-/// Encrypt `vault` to its saved recipients, then sign the ciphertext.
+/// Encrypt `vault` to its saved recipients and sign the ciphertext. The vault
+/// and its signature are replaced only after signing works.
 pub fn store(path: &Path, vault: &vault::Vault, trust: &trust::Trust) -> Result<(), String> {
     trust.check_recipients(vault.recipients())?;
     let mut bytes = vault.to_plaintext()?;
-    let result = ageio::encrypt_replacing(vault.recipients(), &bytes, path);
+    let result = ageio::encrypt_beside(vault.recipients(), &bytes, path);
     bytes.zeroize();
-    result?;
-    trust.sign(path)
+    let tmp = result?;
+    let tmp_sig = trust::signature_path(&tmp);
+    let replaced = trust.sign_to(&tmp, &tmp_sig).and_then(|()| {
+        let sig = trust::signature_path(path);
+        fs::rename(&tmp_sig, &sig).map_err(|e| format!("replace {}: {e}", sig.display()))?;
+        fs::rename(&tmp, path).map_err(|e| format!("replace {}: {e}", path.display()))
+    });
+    if replaced.is_err() {
+        let _ = fs::remove_file(&tmp);
+        let _ = fs::remove_file(&tmp_sig);
+    }
+    replaced
 }
