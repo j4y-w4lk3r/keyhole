@@ -40,6 +40,8 @@ fn run() -> Result<(), String> {
         "init" => cmd_init(args),
         "list" => cmd_list(args),
         "add" => cmd_add(args),
+        "update" => cmd_update(args),
+        "rm" => cmd_rm(args),
         "get" => cmd_get(args),
         "pull" => cmd_pull(args),
         "push" => cmd_push(args),
@@ -176,6 +178,39 @@ fn cmd_add(args: impl Iterator<Item = String>) -> Result<(), String> {
     confirm.zeroize();
     let item = Item::new(name, username, password, "");
     vault.add(item)?;
+    store(Path::new(vault_path), &vault, &open_trust()?)
+}
+
+/// Change an entry's password. The username and notes stay.
+fn cmd_update(args: impl Iterator<Item = String>) -> Result<(), String> {
+    let flags = parse_flags(args)?.no_idle()?;
+    let [vault_path, name] = two_positionals(&flags, "update VAULT -i IDENTITY NAME")?;
+    let identity = flags
+        .identity
+        .as_deref()
+        .ok_or("update needs -i IDENTITY")?;
+    let mut vault = load(identity, Path::new(vault_path), &open_trust()?)?;
+    if vault.get(name).is_none() {
+        return Err(format!("no entry '{name}'"));
+    }
+    let mut password = prompt_secret("new password: ")?;
+    let mut confirm = prompt_secret("confirm: ")?;
+    if password != confirm {
+        password.zeroize();
+        confirm.zeroize();
+        return Err("passwords did not match".into());
+    }
+    confirm.zeroize();
+    vault.set_password(name, password)?;
+    store(Path::new(vault_path), &vault, &open_trust()?)
+}
+
+fn cmd_rm(args: impl Iterator<Item = String>) -> Result<(), String> {
+    let flags = parse_flags(args)?.no_idle()?;
+    let [vault_path, name] = two_positionals(&flags, "rm VAULT -i IDENTITY NAME")?;
+    let identity = flags.identity.as_deref().ok_or("rm needs -i IDENTITY")?;
+    let mut vault = load(identity, Path::new(vault_path), &open_trust()?)?;
+    vault.remove(name)?;
     store(Path::new(vault_path), &vault, &open_trust()?)
 }
 
@@ -486,6 +521,8 @@ keyhole — a local age vault
   keyhole list VAULT -i IDENTITY
   keyhole add  VAULT -i IDENTITY NAME
   keyhole get  VAULT -i IDENTITY NAME
+  keyhole update VAULT -i IDENTITY NAME
+  keyhole rm   VAULT -i IDENTITY NAME
   keyhole sign VAULT
   keyhole rekey VAULT -i IDENTITY -R RECIPIENT [-R RECIPIENT...]
   keyhole trust allow-signer FINGERPRINT
@@ -510,6 +547,7 @@ A vault is opened only when its signature is from a pinned signer, or from a sub
 push is accepted only when --base is the shelf's current version. The first push uses --base 0. The shelf then keeps the newest five revisions.
 pull refuses a version older than this machine has already seen, unless --accept-older is set.
 serve keeps its write token in SHELF/write.token. GET does not need it. PUT does.
+update and rm save a new signed vault. A running daemon keeps the old contents until keyhole unlock reads the file again.
 daemon decrypts once and answers names and ask on a unix socket owned by you. It is not a network port. After --idle seconds with no names or ask (300 by default) it forgets the vault and stays running. unlock reads the file again. lock forgets it now.
 "
     .into()

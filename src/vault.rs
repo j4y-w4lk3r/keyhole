@@ -96,6 +96,27 @@ impl Vault {
         Ok(())
     }
 
+    /// Dropping the item clears its strings.
+    pub fn remove(&mut self, name: &str) -> Result<(), String> {
+        let Some(at) = self.items.iter().position(|item| item.name == name) else {
+            return Err(format!("no entry '{name}'"));
+        };
+        self.items.remove(at);
+        Ok(())
+    }
+
+    pub fn set_password(&mut self, name: &str, password: String) -> Result<(), String> {
+        if password.is_empty() {
+            return Err("password is empty".into());
+        }
+        let Some(item) = self.items.iter_mut().find(|item| item.name == name) else {
+            return Err(format!("no entry '{name}'"));
+        };
+        item.password.zeroize();
+        item.password = password;
+        Ok(())
+    }
+
     pub fn from_plaintext(bytes: &[u8]) -> Result<Self, String> {
         let vault: Self = serde_json::from_slice(bytes).map_err(|e| format!("vault json: {e}"))?;
         if vault.version != 1 {
@@ -156,6 +177,30 @@ mod tests {
         vault.add(Item::new("demo", "", "one", "")).unwrap();
         let err = vault.add(Item::new("demo", "", "two", "")).unwrap_err();
         assert!(err.contains("already"));
+    }
+
+    #[test]
+    fn remove_takes_out_only_that_entry() {
+        let mut vault = Vault::empty(vec!["age1example".into()]);
+        vault.add(Item::new("one", "", "a", "")).unwrap();
+        vault.add(Item::new("two", "", "b", "")).unwrap();
+        vault.remove("one").unwrap();
+        assert_eq!(vault.names(), vec!["two"]);
+        assert!(vault.remove("one").unwrap_err().contains("no entry"));
+    }
+
+    #[test]
+    fn set_password_keeps_the_username_and_notes() {
+        let mut vault = Vault::empty(vec!["age1example".into()]);
+        vault.add(Item::new("demo", "ada", "old", "note")).unwrap();
+        vault.set_password("demo", "new".into()).unwrap();
+        let item = vault.get("demo").unwrap();
+        assert_eq!(item.password(), "new");
+        assert_eq!(item.username(), "ada");
+        assert_eq!(item.notes, "note");
+        assert!(vault.set_password("demo", String::new()).is_err());
+        assert_eq!(vault.get("demo").unwrap().password(), "new");
+        assert!(vault.set_password("other", "x".into()).is_err());
     }
 
     #[test]

@@ -103,7 +103,11 @@ impl Practice {
     }
 
     fn command(&self) -> Command {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_keyhole"));
+        self.command_named(env!("CARGO_BIN_EXE_keyhole"))
+    }
+
+    fn command_named(&self, program: &str) -> Command {
+        let mut cmd = Command::new(program);
         cmd.env("KEYHOLE_STATE_DIR", &self.state);
         cmd.env("GNUPGHOME", &self.gpg);
         cmd
@@ -658,6 +662,72 @@ fn type_sends_the_secret_to_wtype_and_then_enter() {
     assert!(!stderr(&output).contains("s3cret-value"));
     assert_eq!(fs::read_to_string(&typed).unwrap(), "s3cret-value");
     assert_eq!(fs::read_to_string(&keys).unwrap().trim(), "-k Return");
+}
+
+#[test]
+fn update_and_rm_change_the_saved_vault() {
+    let practice = Practice::new("edit");
+    let recipient = fs::read_to_string(&practice.recipient_file)
+        .unwrap()
+        .trim()
+        .to_string();
+    let mut vault = Vault::empty(vec![recipient]);
+    for name in ["keep", "change", "gone"] {
+        vault
+            .add(Item::new(name, "ada", format!("{name}-old"), ""))
+            .unwrap();
+    }
+    store(&practice.vault, &vault, &practice.trust()).unwrap();
+    drop(vault);
+    let vault_path = practice.vault.to_str().unwrap();
+    let identity = practice.identity.to_str().unwrap();
+
+    // Signing and the password prompt both need a terminal, so give them one.
+    let in_terminal = |line: String| {
+        practice
+            .command_named("script")
+            .args(["-qec", &line, "/dev/null"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap()
+    };
+    let program = env!("CARGO_BIN_EXE_keyhole");
+
+    let removed = in_terminal(format!("{program} rm {vault_path} -i {identity} gone"))
+        .wait_with_output()
+        .unwrap();
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stdout)
+    );
+    let missing = in_terminal(format!("{program} rm {vault_path} -i {identity} gone"))
+        .wait_with_output()
+        .unwrap();
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stdout).contains("no entry"));
+
+    let mut updated = in_terminal(format!(
+        "{program} update {vault_path} -i {identity} change"
+    ));
+    let mut input = updated.stdin.take().unwrap();
+    for _ in 0..2 {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        input.write_all(b"change-new\r").unwrap();
+        input.flush().unwrap();
+    }
+    let output = updated.wait_with_output().unwrap();
+    let shown = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{shown}");
+    assert!(!shown.contains("change-new"));
+
+    let opened = keyhole::load(&practice.identity, &practice.vault, &practice.trust()).unwrap();
+    assert_eq!(opened.names(), vec!["keep", "change"]);
+    assert_eq!(opened.get("change").unwrap().password(), "change-new");
+    assert_eq!(opened.get("change").unwrap().username(), "ada");
+    assert_eq!(opened.get("keep").unwrap().password(), "keep-old");
 }
 
 trait IgnoringChildren {
