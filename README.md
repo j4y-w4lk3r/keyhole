@@ -90,7 +90,7 @@ demo /system.slice/keychord.service
 
 A program running as you cannot join a system service's cgroup, but it can edit whatever that service runs if the files are yours. Keep the binary, the script, and its settings root-owned. Root gets past all of this. So can `keyhole get`, which still needs your key.
 
-`keyhole type NAME` types an entry into the focused window and presses Enter, with no shell pipe. Install wtype for it as `/usr/local/lib/keyhole/wtype`, owned by root, mode 711. The kernel then stops other programs running as you from opening its input through `/proc`.
+`keyhole type NAME` types an entry into the focused window and presses Enter, with no shell pipe. Build `tools/keytype` and install it as `/usr/local/lib/keyhole/wtype`, owned by root, mode 711. The kernel then stops other programs running as you from opening its input through `/proc`. keytype sends the keys of a US keyboard and refuses text it cannot type. wtype itself builds a layout from the text, and 1Password dropped characters from it.
 
 ## Not in this version
 
