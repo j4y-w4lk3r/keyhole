@@ -743,6 +743,24 @@ fn update_and_rm_change_the_saved_vault() {
     assert_eq!(opened.get("change").unwrap().password(), "piped-new");
     assert_eq!(opened.get("change").unwrap().username(), "ada");
 
+    // add takes the username as a flag and the password from a pipe.
+    let added = in_terminal(format!(
+        "printf 'fresh-pw\\n' | {program} add {vault_path} -i {identity} fresh --username bob --password-stdin"
+    ))
+    .wait_with_output()
+    .unwrap();
+    assert!(added.status.success(), "{}", String::from_utf8_lossy(&added.stdout));
+    let opened = keyhole::load(&practice.identity, &practice.vault, &practice.trust()).unwrap();
+    assert_eq!(opened.get("fresh").unwrap().password(), "fresh-pw");
+    assert_eq!(opened.get("fresh").unwrap().username(), "bob");
+    drop(opened);
+    let no_user = in_terminal(format!(
+        "printf 'x\\n' | {program} add {vault_path} -i {identity} other --password-stdin"
+    ))
+    .wait_with_output()
+    .unwrap();
+    assert!(!no_user.status.success());
+
     // Two lines are refused, so a stray paste cannot become the password.
     let two = in_terminal(format!(
         "printf 'a\\nb\\n' | {program} update {vault_path} -i {identity} change --password-stdin"

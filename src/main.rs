@@ -69,6 +69,7 @@ struct Flags {
     accept_older: bool,
     idle: Option<u64>,
     password_stdin: bool,
+    username: Option<String>,
 }
 
 fn parse_flags(args: impl Iterator<Item = String>) -> Result<Flags, String> {
@@ -80,6 +81,7 @@ fn parse_flags(args: impl Iterator<Item = String>) -> Result<Flags, String> {
         accept_older: false,
         idle: None,
         password_stdin: false,
+        username: None,
     };
     let mut args = args.peekable();
     while let Some(arg) = args.next() {
@@ -100,6 +102,10 @@ fn parse_flags(args: impl Iterator<Item = String>) -> Result<Flags, String> {
             }
             "--accept-older" => flags.accept_older = true,
             "--password-stdin" => flags.password_stdin = true,
+            "--username" => {
+                let name = args.next().ok_or("--username needs a value")?;
+                flags.username = Some(name);
+            }
             "--idle" => {
                 let n = args.next().ok_or("--idle needs a number of seconds")?;
                 flags.idle = Some(n.parse().map_err(|_| "--idle needs a number")?);
@@ -167,14 +173,21 @@ fn cmd_list(args: impl Iterator<Item = String>) -> Result<(), String> {
 
 fn cmd_add(args: impl Iterator<Item = String>) -> Result<(), String> {
     let flags = parse_flags(args)?.no_idle()?;
-    if flags.password_stdin {
-        return Err("--password-stdin works with update; add the entry first".into());
+    if flags.password_stdin && flags.username.is_none() {
+        return Err("add --password-stdin also needs --username, since stdin holds the password".into());
     }
     let [vault_path, name] = two_positionals(&flags, "add VAULT -i IDENTITY NAME")?;
     let identity = flags.identity.as_deref().ok_or("add needs -i IDENTITY")?;
     let mut vault = load(identity, Path::new(vault_path), &open_trust()?)?;
-    let username = prompt_line("username: ")?;
-    let password = prompt_twice("password: ")?;
+    let username = match flags.username.clone() {
+        Some(name) => name,
+        None => prompt_line("username: ")?,
+    };
+    let password = if flags.password_stdin {
+        password_from_stdin()?
+    } else {
+        prompt_twice("password: ")?
+    };
     let item = Item::new(name, username, password, "");
     vault.add(item)?;
     store(Path::new(vault_path), &vault, &open_trust()?)
@@ -553,7 +566,7 @@ keyhole — a local age vault
 
   keyhole init VAULT -R RECIPIENT [-R RECIPIENT...]
   keyhole list VAULT -i IDENTITY
-  keyhole add  VAULT -i IDENTITY NAME
+  keyhole add  VAULT -i IDENTITY NAME [--username U] [--password-stdin]
   keyhole get  VAULT -i IDENTITY NAME
   keyhole update VAULT -i IDENTITY NAME [--password-stdin]
   keyhole rm   VAULT -i IDENTITY NAME
