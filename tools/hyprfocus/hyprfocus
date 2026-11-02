@@ -1,0 +1,48 @@
+#!/usr/bin/python3 -IS
+"""Print the focused window as JSON, asked straight from Hyprland.
+
+hyprctl trusts HYPRLAND_INSTANCE_SIGNATURE, so any program could point it at
+a socket of its own and describe a fake window. This checks that the program
+on the other end of the socket is Hyprland itself, then asks over that same
+connection. Exit 1 and print nothing when the check fails.
+"""
+import os
+import socket
+import struct
+import sys
+
+COMPOSITOR = "/usr/bin/Hyprland"
+
+
+def fail(why):
+    print(f"hyprfocus: {why}", file=sys.stderr)
+    sys.exit(1)
+
+
+runtime = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+instance = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "")
+if not instance or "/" in instance or instance.startswith("."):
+    fail("no Hyprland instance")
+path = os.path.join(runtime, "hypr", instance, ".socket.sock")
+
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+    s.settimeout(2)
+    try:
+        s.connect(path)
+    except OSError:
+        fail("cannot reach Hyprland")
+    pid, uid, _ = struct.unpack("3i", s.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+    try:
+        exe = os.readlink(f"/proc/{pid}/exe")
+    except OSError:
+        exe = ""
+    if uid != os.getuid() or pid <= 0 or exe != COMPOSITOR:
+        fail(f"the socket does not belong to {COMPOSITOR}")
+    s.sendall(b"j/activewindow")
+    reply = bytearray()
+    while chunk := s.recv(65536):
+        reply += chunk
+        if len(reply) > 1 << 20:
+            fail("reply too large")
+
+sys.stdout.buffer.write(bytes(reply))

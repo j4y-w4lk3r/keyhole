@@ -13,7 +13,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
 #include <wayland-client.h>
@@ -167,10 +169,36 @@ static void press(struct wl_display *display, struct zwp_virtual_keyboard_v1 *ke
     }
 }
 
+// The compositor every key press goes to. Anyone can set WAYLAND_DISPLAY,
+// so the program on the other end of the socket is checked before typing.
+#ifndef COMPOSITOR
+#define COMPOSITOR "/usr/bin/Hyprland"
+#endif
+
+static bool real_compositor(struct wl_display *display) {
+    struct ucred peer;
+    socklen_t size = sizeof peer;
+    if (getsockopt(wl_display_get_fd(display), SOL_SOCKET, SO_PEERCRED, &peer, &size) != 0)
+        return false;
+    if (peer.uid != getuid() || peer.pid <= 0) return false;
+    char link[64], exe[PATH_MAX];
+    snprintf(link, sizeof link, "/proc/%d/exe", (int)peer.pid);
+    ssize_t n = readlink(link, exe, sizeof exe - 1);
+    if (n <= 0) return false;
+    exe[n] = 0;
+    return strcmp(exe, COMPOSITOR) == 0;
+}
+
 static int run(const unsigned char *text, size_t length, bool enter) {
     struct wl_display *display = wl_display_connect(NULL);
     if (!display) {
         fputs("keytype: no Wayland display\n", stderr);
+        return 1;
+    }
+    if (!real_compositor(display)) {
+        fputs("keytype: the Wayland socket does not belong to " COMPOSITOR ". Nothing was typed.\n",
+              stderr);
+        wl_display_disconnect(display);
         return 1;
     }
     struct wl_registry *registry = wl_display_get_registry(display);
