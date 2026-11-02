@@ -728,6 +728,29 @@ fn update_and_rm_change_the_saved_vault() {
     assert_eq!(opened.get("change").unwrap().password(), "change-new");
     assert_eq!(opened.get("change").unwrap().username(), "ada");
     assert_eq!(opened.get("keep").unwrap().password(), "keep-old");
+    drop(opened);
+
+    // A script can pipe the new password in instead of typing it.
+    let piped = in_terminal(format!(
+        "printf 'piped-new\\n' | {program} update {vault_path} -i {identity} change --password-stdin"
+    ))
+    .wait_with_output()
+    .unwrap();
+    let shown = String::from_utf8_lossy(&piped.stdout);
+    assert!(piped.status.success(), "{shown}");
+    assert!(!shown.contains("piped-new"));
+    let opened = keyhole::load(&practice.identity, &practice.vault, &practice.trust()).unwrap();
+    assert_eq!(opened.get("change").unwrap().password(), "piped-new");
+    assert_eq!(opened.get("change").unwrap().username(), "ada");
+
+    // Two lines are refused, so a stray paste cannot become the password.
+    let two = in_terminal(format!(
+        "printf 'a\\nb\\n' | {program} update {vault_path} -i {identity} change --password-stdin"
+    ))
+    .wait_with_output()
+    .unwrap();
+    assert!(!two.status.success());
+    assert!(String::from_utf8_lossy(&two.stdout).contains("exactly one line"));
 }
 
 trait IgnoringChildren {

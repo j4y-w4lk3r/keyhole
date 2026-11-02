@@ -1,7 +1,7 @@
 //! CLI for a local age vault. Passwords are read from the terminal, never from argv.
 
 use std::env;
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
@@ -68,6 +68,7 @@ struct Flags {
     base: Option<u64>,
     accept_older: bool,
     idle: Option<u64>,
+    password_stdin: bool,
 }
 
 fn parse_flags(args: impl Iterator<Item = String>) -> Result<Flags, String> {
@@ -78,6 +79,7 @@ fn parse_flags(args: impl Iterator<Item = String>) -> Result<Flags, String> {
         base: None,
         accept_older: false,
         idle: None,
+        password_stdin: false,
     };
     let mut args = args.peekable();
     while let Some(arg) = args.next() {
@@ -97,6 +99,7 @@ fn parse_flags(args: impl Iterator<Item = String>) -> Result<Flags, String> {
                 flags.base = Some(n.parse().map_err(|_| "--base needs a number")?);
             }
             "--accept-older" => flags.accept_older = true,
+            "--password-stdin" => flags.password_stdin = true,
             "--idle" => {
                 let n = args.next().ok_or("--idle needs a number of seconds")?;
                 flags.idle = Some(n.parse().map_err(|_| "--idle needs a number")?);
@@ -164,18 +167,14 @@ fn cmd_list(args: impl Iterator<Item = String>) -> Result<(), String> {
 
 fn cmd_add(args: impl Iterator<Item = String>) -> Result<(), String> {
     let flags = parse_flags(args)?.no_idle()?;
+    if flags.password_stdin {
+        return Err("--password-stdin works with update; add the entry first".into());
+    }
     let [vault_path, name] = two_positionals(&flags, "add VAULT -i IDENTITY NAME")?;
     let identity = flags.identity.as_deref().ok_or("add needs -i IDENTITY")?;
     let mut vault = load(identity, Path::new(vault_path), &open_trust()?)?;
     let username = prompt_line("username: ")?;
-    let mut password = prompt_secret("password: ")?;
-    let mut confirm = prompt_secret("confirm: ")?;
-    if password != confirm {
-        password.zeroize();
-        confirm.zeroize();
-        return Err("passwords did not match".into());
-    }
-    confirm.zeroize();
+    let password = prompt_twice("password: ")?;
     let item = Item::new(name, username, password, "");
     vault.add(item)?;
     store(Path::new(vault_path), &vault, &open_trust()?)
@@ -193,14 +192,11 @@ fn cmd_update(args: impl Iterator<Item = String>) -> Result<(), String> {
     if vault.get(name).is_none() {
         return Err(format!("no entry '{name}'"));
     }
-    let mut password = prompt_secret("new password: ")?;
-    let mut confirm = prompt_secret("confirm: ")?;
-    if password != confirm {
-        password.zeroize();
-        confirm.zeroize();
-        return Err("passwords did not match".into());
-    }
-    confirm.zeroize();
+    let password = if flags.password_stdin {
+        password_from_stdin()?
+    } else {
+        prompt_twice("new password: ")?
+    };
     vault.set_password(name, password)?;
     store(Path::new(vault_path), &vault, &open_trust()?)
 }
@@ -509,6 +505,44 @@ fn prompt_secret(label: &str) -> Result<String, String> {
     rpassword::prompt_password(label).map_err(|e| format!("password prompt: {e}"))
 }
 
+/// Ask twice on the terminal and keep the answer only when both match.
+fn prompt_twice(label: &str) -> Result<String, String> {
+    let mut password = prompt_secret(label)?;
+    let mut confirm = prompt_secret("confirm: ")?;
+    if password != confirm {
+        password.zeroize();
+        confirm.zeroize();
+        return Err("passwords did not match".into());
+    }
+    confirm.zeroize();
+    Ok(password)
+}
+
+/// Read the password from a pipe, so a script can pass it without a command line
+/// or a paste. One trailing newline is dropped. A terminal is refused, because
+/// typing there would echo the password.
+fn password_from_stdin() -> Result<String, String> {
+    if io::stdin().is_terminal() {
+        return Err("--password-stdin needs the password piped in, not typed".into());
+    }
+    let mut text = String::new();
+    io::stdin()
+        .take(64 * 1024)
+        .read_to_string(&mut text)
+        .map_err(|e| format!("read password: {e}"))?;
+    let trimmed = text
+        .strip_suffix("\r\n")
+        .or_else(|| text.strip_suffix('\n'))
+        .unwrap_or(&text);
+    if trimmed.is_empty() || trimmed.contains('\n') {
+        text.zeroize();
+        return Err("--password-stdin needs exactly one line".into());
+    }
+    let password = trimmed.to_string();
+    text.zeroize();
+    Ok(password)
+}
+
 fn print_help() {
     print!("{}", help_text());
 }
@@ -521,7 +555,7 @@ keyhole — a local age vault
   keyhole list VAULT -i IDENTITY
   keyhole add  VAULT -i IDENTITY NAME
   keyhole get  VAULT -i IDENTITY NAME
-  keyhole update VAULT -i IDENTITY NAME
+  keyhole update VAULT -i IDENTITY NAME [--password-stdin]
   keyhole rm   VAULT -i IDENTITY NAME
   keyhole sign VAULT
   keyhole rekey VAULT -i IDENTITY -R RECIPIENT [-R RECIPIENT...]

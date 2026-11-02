@@ -304,14 +304,14 @@ pub fn signature_path(age_path: &Path) -> PathBuf {
 }
 
 /// The terminal this process was started in, if it is a real one.
+/// The terminal this command runs in. stdin comes first; stderr and stdout
+/// cover `update --password-stdin`, whose stdin is a pipe.
 fn controlling_tty() -> Option<PathBuf> {
-    let path = fs::read_link("/proc/self/fd/0").ok()?;
-    let text = path.to_string_lossy();
-    if text.starts_with("/dev/pts/") || text.starts_with("/dev/tty") {
-        Some(path)
-    } else {
-        None
-    }
+    [0, 2, 1].into_iter().find_map(|fd| {
+        let path = fs::read_link(format!("/proc/self/fd/{fd}")).ok()?;
+        let text = path.to_string_lossy();
+        (text.starts_with("/dev/pts/") || text.starts_with("/dev/tty")).then_some(path)
+    })
 }
 
 fn normalize_fpr(fingerprint: &str) -> Result<String, String> {
