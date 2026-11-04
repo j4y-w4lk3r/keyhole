@@ -5,7 +5,10 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
+#[cfg(not(target_os = "macos"))]
 const PIN_TEXT: &str = include_str!("../fido.pin");
+#[cfg(target_os = "macos")]
+const PIN_TEXT: &str = include_str!("../fido.macos.pin");
 const MARKER: &[u8] = b"AGE-PLUGIN-FIDO2-HMAC";
 
 struct Pin<'a> {
@@ -72,7 +75,9 @@ mod tests {
 
     #[test]
     fn a_software_identity_does_not_need_the_plugin() {
-        let dir = std::path::PathBuf::from(format!("/dev/shm/keyhole-fido-{}", std::process::id()));
+        let dir = std::path::PathBuf::from(format!(
+            "{}/keyhole-fido-{}",
+            crate::harden::scratch_base().display(), std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("identity.txt");

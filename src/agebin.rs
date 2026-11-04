@@ -7,7 +7,10 @@ use std::process::Command;
 
 use sha2::{Digest, Sha256};
 
+#[cfg(not(target_os = "macos"))]
 const PIN_TEXT: &str = include_str!("../age.pin");
+#[cfg(target_os = "macos")]
+const PIN_TEXT: &str = include_str!("../age.macos.pin");
 
 struct Pin<'a> {
     path: &'a str,
@@ -75,6 +78,6 @@ ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
     #[test]
     fn installed_age_matches_the_pin() {
         let cmd = age_command().expect("pinned age");
-        assert_eq!(cmd.get_program(), "/usr/bin/age");
+        assert_eq!(cmd.get_program(), parse_pin(PIN_TEXT).unwrap().path);
     }
 }

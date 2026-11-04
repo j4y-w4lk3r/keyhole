@@ -139,7 +139,9 @@ mod tests {
 
     #[test]
     fn a_missing_file_is_open_and_an_unsafe_one_is_refused() {
-        let dir = PathBuf::from(format!("/dev/shm/keyhole-policy-{}", std::process::id()));
+        let dir = PathBuf::from(format!(
+            "{}/keyhole-policy-{}",
+            crate::harden::scratch_base().display(), std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();

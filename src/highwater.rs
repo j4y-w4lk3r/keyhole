@@ -104,9 +104,13 @@ mod tests {
 
     #[test]
     fn an_older_offer_does_not_lower_the_memory() {
-        let dir = PathBuf::from(format!("/dev/shm/keyhole-hw-{}-mem", std::process::id()));
+        let dir = PathBuf::from(format!(
+            "{}/keyhole-hw-{}-mem",
+            crate::harden::scratch_base().display(), std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        let shelf = PathBuf::from(format!("/dev/shm/keyhole-hw-{}-shelf", std::process::id()));
+        let shelf = PathBuf::from(format!(
+            "{}/keyhole-hw-{}-shelf",
+            crate::harden::scratch_base().display(), std::process::id()));
         let _ = fs::remove_dir_all(&shelf);
         fs::create_dir_all(&shelf).unwrap();
         let memory = HighWater::open(&dir).unwrap();

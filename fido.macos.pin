@@ -1,0 +1,4 @@
+# macOS (Apple Silicon). Plugin installed root-owned: sudo install -m 755 -o root -g wheel age-plugin-fido2-hmac /usr/local/bin/
+# Update on purpose after a plugin upgrade, then rebuild.
+/usr/local/bin/age-plugin-fido2-hmac
+36dcdf368ca575ba883925d9ff58f200526003f86dd5a23290169cd65181440c

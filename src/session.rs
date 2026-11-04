@@ -4,7 +4,9 @@
 use std::fs;
 use std::io::{self, Read, Write};
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
+#[cfg(target_os = "linux")]
+use std::os::unix::io::{AsRawFd, FromRawFd};
+use std::os::unix::io::OwnedFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -22,6 +24,7 @@ use crate::vault::Vault;
 pub const DEFAULT_IDLE_SECS: u64 = 300;
 
 // Linux 6.5. Not every libc crate version names it.
+#[cfg(target_os = "linux")]
 const SO_PEERPIDFD: libc::c_int = 77;
 
 // Root-owned, mode 711. A program its user cannot read gets the same memory protection.
@@ -415,6 +418,7 @@ fn report_refusal(request: &Request, pid: i32, reason: &str) {
 }
 
 /// The pidfd names the process that connected, so a reused pid cannot pass the check.
+#[cfg(target_os = "linux")]
 fn peer_pidfd(stream: &UnixStream) -> Result<OwnedFd, String> {
     let mut fd: libc::c_int = -1;
     let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
@@ -433,6 +437,7 @@ fn peer_pidfd(stream: &UnixStream) -> Result<OwnedFd, String> {
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
+#[cfg(target_os = "linux")]
 fn pid_is_alive(pidfd: &OwnedFd) -> bool {
     let rc = unsafe {
         libc::syscall(
@@ -446,6 +451,7 @@ fn pid_is_alive(pidfd: &OwnedFd) -> bool {
     rc == 0
 }
 
+#[cfg(target_os = "linux")]
 fn same_user(stream: &UnixStream) -> Result<i32, String> {
     let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
     let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
@@ -567,4 +573,22 @@ mod tests {
         assert!(text.contains("ada"));
         assert!(!session.expire());
     }
+}
+
+// The session server checks callers with Linux-only kernel features
+// (SO_PEERPIDFD, pidfd_send_signal, cgroups). Elsewhere it refuses every client,
+// so it can never run with weaker checks.
+#[cfg(not(target_os = "linux"))]
+fn peer_pidfd(_stream: &UnixStream) -> Result<OwnedFd, String> {
+    Err("the keyhole session is Linux-only".into())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn pid_is_alive(_pidfd: &OwnedFd) -> bool {
+    false
+}
+
+#[cfg(not(target_os = "linux"))]
+fn same_user(_stream: &UnixStream) -> Result<i32, String> {
+    Err("the keyhole session is Linux-only".into())
 }

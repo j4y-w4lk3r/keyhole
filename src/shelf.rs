@@ -444,7 +444,8 @@ mod tests {
 
     fn scratch(name: &str) -> PathBuf {
         let dir = PathBuf::from(format!(
-            "/dev/shm/keyhole-shelf-{}-{name}",
+            "{}/keyhole-shelf-{}-{name}",
+            crate::harden::scratch_base().display(),
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&dir);

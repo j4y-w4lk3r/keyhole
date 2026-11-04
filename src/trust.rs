@@ -306,6 +306,19 @@ pub fn signature_path(age_path: &Path) -> PathBuf {
 /// The terminal this process was started in, if it is a real one.
 /// The terminal this command runs in. stdin comes first; stderr and stdout
 /// cover `update --password-stdin`, whose stdin is a pipe.
+#[cfg(not(target_os = "linux"))]
+fn controlling_tty() -> Option<PathBuf> {
+    [0, 2, 1].into_iter().find_map(|fd| {
+        let name = unsafe { libc::ttyname(fd) };
+        if name.is_null() {
+            return None;
+        }
+        let text = unsafe { std::ffi::CStr::from_ptr(name) }.to_string_lossy().into_owned();
+        text.starts_with("/dev/tty").then(|| PathBuf::from(text))
+    })
+}
+
+#[cfg(target_os = "linux")]
 fn controlling_tty() -> Option<PathBuf> {
     [0, 2, 1].into_iter().find_map(|fd| {
         let path = fs::read_link(format!("/proc/self/fd/{fd}")).ok()?;
@@ -437,16 +450,16 @@ mod tests {
 
     #[test]
     fn a_subkey_signature_also_names_the_primary() {
-        let status = "[GNUPG:] VALIDSIG A811D80289ED5FFDFC18EFF0831B58B1435489BC 2026-10-24 1792861271 0 4 0 1 10 00 E7702AAF1FEE076958B66C15E5712AFC8C6E18D6";
+        let status = "[GNUPG:] VALIDSIG 1111222233334444555566667777888899990000 2026-10-24 1792861271 0 4 0 1 10 00 AAAABBBBCCCCDDDDEEEEFFFF0000111122223333";
         let sig = validsig(status).unwrap();
-        assert_eq!(sig.signing, "A811D80289ED5FFDFC18EFF0831B58B1435489BC");
+        assert_eq!(sig.signing, "1111222233334444555566667777888899990000");
         assert_eq!(
             sig.primary.as_deref(),
-            Some("E7702AAF1FEE076958B66C15E5712AFC8C6E18D6")
+            Some("AAAABBBBCCCCDDDDEEEEFFFF0000111122223333")
         );
         assert!(
             sig.fingerprints()
-                .any(|fpr| fpr == "E7702AAF1FEE076958B66C15E5712AFC8C6E18D6")
+                .any(|fpr| fpr == "AAAABBBBCCCCDDDDEEEEFFFF0000111122223333")
         );
     }
 }

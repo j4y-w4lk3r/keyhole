@@ -6,7 +6,10 @@ use std::process::Command;
 
 use sha2::{Digest, Sha256};
 
+#[cfg(not(target_os = "macos"))]
 const PIN_TEXT: &str = include_str!("../gpg.pin");
+#[cfg(target_os = "macos")]
+const PIN_TEXT: &str = include_str!("../gpg.macos.pin");
 
 struct Pin<'a> {
     path: &'a str,
@@ -49,6 +52,6 @@ mod tests {
     #[test]
     fn installed_gpg_matches_the_pin() {
         let cmd = gpg_command().expect("pinned gpg");
-        assert_eq!(cmd.get_program(), "/usr/bin/gpg");
+        assert_eq!(cmd.get_program(), parse_pin(PIN_TEXT).unwrap().path);
     }
 }

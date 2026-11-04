@@ -1,0 +1,3 @@
+# macOS (Apple Silicon, Homebrew). Update on purpose after a Homebrew upgrade, then rebuild.
+/opt/homebrew/Cellar/age/1.3.2/bin/age
+5e5d756f6659ca8fe0a2f2e05f126529e5d36c5d65c961e6912966482f0f8de1

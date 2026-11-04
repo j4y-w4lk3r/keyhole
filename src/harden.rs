@@ -5,6 +5,20 @@ use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 
+/// Where short-lived files go. Linux: /dev/shm (RAM). macOS has no RAM disk,
+/// so the per-user temp folder ($TMPDIR, mode 700). Only encrypted bytes and
+/// test files are written here; plaintext never touches a file.
+pub fn scratch_base() -> std::path::PathBuf {
+    #[cfg(target_os = "linux")]
+    {
+        std::path::PathBuf::from("/dev/shm")
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        std::env::temp_dir()
+    }
+}
+
 pub fn disable_core_dumps() -> Result<(), String> {
     let limit = libc::rlimit {
         rlim_cur: 0,
@@ -19,8 +33,21 @@ pub fn disable_core_dumps() -> Result<(), String> {
 }
 
 /// Stop other programs running as this user from reading this process's memory.
+#[cfg(target_os = "linux")]
 pub fn deny_memory_readers() -> Result<(), String> {
     let rc = unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) };
+    if rc != 0 {
+        Err("could not protect this process's memory".into())
+    } else {
+        Ok(())
+    }
+}
+
+/// macOS: refuse debugger attachment (the closest match to PR_SET_DUMPABLE=0).
+#[cfg(target_os = "macos")]
+pub fn deny_memory_readers() -> Result<(), String> {
+    const PT_DENY_ATTACH: libc::c_int = 31;
+    let rc = unsafe { libc::ptrace(PT_DENY_ATTACH, 0, std::ptr::null_mut(), 0) };
     if rc != 0 {
         Err("could not protect this process's memory".into())
     } else {
@@ -112,7 +139,9 @@ mod tests {
 
     #[test]
     fn rejects_a_group_readable_identity_and_a_link() {
-        let dir = PathBuf::from(format!("/dev/shm/keyhole-id-{}", std::process::id()));
+        let dir = PathBuf::from(format!(
+            "{}/keyhole-id-{}",
+            crate::harden::scratch_base().display(), std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("identity.txt");

@@ -19,7 +19,8 @@ struct Practice {
 
 impl Practice {
     fn new(name: &str) -> Self {
-        let dir = PathBuf::from(format!("/dev/shm/keyhole-it-{}-{name}", std::process::id()));
+        let dir = keyhole::harden::scratch_base()
+            .join(format!("keyhole-it-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let gpg = dir.join("gpg");
@@ -342,6 +343,7 @@ fn an_extra_age_recipient_is_refused() {
     assert!(err.contains("hidden"), "{err}");
 }
 
+#[cfg(target_os = "linux")] // the session daemon is Linux-only
 #[test]
 fn daemon_locks_when_idle_and_unlock_reads_again() {
     let practice = Practice::new("daemon");
@@ -435,6 +437,7 @@ fn daemon_locks_when_idle_and_unlock_reads_again() {
     );
 }
 
+#[cfg(target_os = "linux")] // the session daemon is Linux-only
 #[test]
 fn the_policy_limits_who_can_ask_and_the_daemon_hides_its_memory() {
     let practice = Practice::new("policy");
@@ -605,6 +608,7 @@ fn only_the_real_system_service_passes_the_policy() {
     assert_eq!(err.matches("refused").count(), 3, "{err}");
 }
 
+#[cfg(target_os = "linux")] // the session daemon is Linux-only
 #[test]
 fn type_sends_the_secret_to_wtype_and_then_enter() {
     let practice = Practice::new("type");
@@ -686,7 +690,7 @@ fn update_and_rm_change_the_saved_vault() {
     let in_terminal = |line: String| {
         practice
             .command_named("script")
-            .args(["-qec", &line, "/dev/null"])
+            .args(script_args(&line))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -857,4 +861,15 @@ fn a_failed_signature_leaves_the_vault_and_its_signature_alone() {
     assert_eq!(fs::read(&sig).unwrap(), before.1);
     assert!(!practice.dir.join("vault.age.tmp").exists());
     assert!(!practice.dir.join("vault.age.tmp.sig").exists());
+}
+
+/// util-linux `script -qec CMD FILE` vs BSD/macOS `script -q FILE sh -c CMD`.
+#[cfg(target_os = "linux")]
+fn script_args(line: &str) -> Vec<String> {
+    vec!["-qec".into(), line.into(), "/dev/null".into()]
+}
+
+#[cfg(not(target_os = "linux"))]
+fn script_args(line: &str) -> Vec<String> {
+    vec!["-q".into(), "/dev/null".into(), "sh".into(), "-c".into(), line.into()]
 }

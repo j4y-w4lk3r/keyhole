@@ -95,3 +95,13 @@ A program running as you cannot join a system service's cgroup, but it can edit 
 ## Not in this version
 
 No browser extension, no phone app, no server that can decrypt.
+
+## macOS
+
+The same source builds on macOS (Apple Silicon). `get`, `add`, `update`, `rm` and the vault checks work as on Linux; the session daemon (`keyhole session`, `type`) is Linux-only and refuses to start elsewhere, because its caller checks need SO_PEERPIDFD, pidfd and cgroups.
+
+- macOS reads its own pins: `age.macos.pin`, `gpg.macos.pin`, `fido.macos.pin`. Update them on purpose after a Homebrew upgrade, then rebuild.
+- Process memory is protected with `PT_DENY_ATTACH` instead of `PR_SET_DUMPABLE`.
+- Short-lived encrypted bytes go to `$TMPDIR` (per-user, mode 700) instead of `/dev/shm`. Plaintext never touches a file on either system.
+- Run the tests with a short `TMPDIR` (for example `mkdir -m 700 /tmp/kh-$USER && TMPDIR=/tmp/kh-$USER cargo test`): macOS limits socket paths to 104 characters and gpg-agent puts its socket in the test keyring.
+

@@ -15,7 +15,8 @@ pub fn decrypt(identity: &Path, vault: &Path) -> Result<Vec<u8>, String> {
 pub fn decrypt_bytes(identity: &Path, age_bytes: &[u8]) -> Result<Vec<u8>, String> {
     crate::harden::check_identity(identity)?;
     let dir = PathBuf::from(format!(
-        "/dev/shm/keyhole-dec-{}-{}",
+            "{}/keyhole-dec-{}-{}",
+            crate::harden::scratch_base().display(),
         std::process::id(),
         crate::state::random_hex(4)?
     ));
