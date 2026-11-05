@@ -184,6 +184,48 @@ fn password_is_not_present_in_the_age_file() {
 }
 
 #[test]
+fn get_with_several_names_decrypts_once_and_is_all_or_nothing() {
+    let practice = Practice::new("many");
+    let mut vault = Vault::empty(vec![
+        fs::read_to_string(&practice.recipient_file)
+            .unwrap()
+            .trim()
+            .to_string(),
+    ]);
+    vault.add(Item::new("first", "ada", "one-value", "")).unwrap();
+    vault.add(Item::new("second", "", "two-value", "")).unwrap();
+    vault.add(Item::new("third", "bob", "three-value", "")).unwrap();
+    store(&practice.vault, &vault, &practice.trust()).unwrap();
+    drop(vault);
+
+    let get = |names: &[&str]| {
+        let mut cmd = practice.command();
+        cmd.arg("get").arg(&practice.vault).arg("-i").arg(&practice.identity);
+        for n in names {
+            cmd.arg(n);
+        }
+        cmd.output().unwrap()
+    };
+
+    let got = get(&["third", "first", "second"]);
+    assert!(got.status.success(), "{}", String::from_utf8_lossy(&got.stderr));
+    assert_eq!(
+        String::from_utf8(got.stdout).unwrap(),
+        "three-value\none-value\ntwo-value\n"
+    );
+    let err = String::from_utf8(got.stderr).unwrap();
+    assert!(err.contains("username third: bob") && err.contains("username first: ada"));
+
+    let missing = get(&["first", "nope"]);
+    assert!(!missing.status.success());
+    assert!(missing.stdout.is_empty(), "nothing may be printed when one name is missing");
+
+    let single = get(&["second"]);
+    assert!(single.status.success());
+    assert_eq!(String::from_utf8(single.stdout).unwrap(), "two-value\n");
+}
+
+#[test]
 fn a_changed_byte_and_an_unpinned_recipient_are_refused() {
     let practice = Practice::new("sig");
     let recipient = fs::read_to_string(&practice.recipient_file)

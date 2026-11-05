@@ -464,8 +464,15 @@ fn cmd_version(_args: impl Iterator<Item = String>) -> Result<(), String> {
 
 fn cmd_get(args: impl Iterator<Item = String>) -> Result<(), String> {
     let flags = parse_flags(args)?.no_idle()?;
-    let [vault_path, name] = two_positionals(&flags, "get VAULT -i IDENTITY NAME")?;
+    let (vault_path, names) = match flags.positional.as_slice() {
+        [v, first, rest @ ..] => (v.as_str(), std::iter::once(first).chain(rest).collect::<Vec<_>>()),
+        _ => return Err("usage: keyhole get VAULT -i IDENTITY NAME [NAME...]".into()),
+    };
     let identity = flags.identity.as_deref().ok_or("get needs -i IDENTITY")?;
+    if names.len() > 1 {
+        return get_many(identity, vault_path, &names);
+    }
+    let name = names[0].as_str();
     let vault = load(identity, Path::new(vault_path), &open_trust()?)?;
     let Some(item) = vault.get(name) else {
         return Err(format!("no entry '{name}'"));
@@ -482,6 +489,35 @@ fn cmd_get(args: impl Iterator<Item = String>) -> Result<(), String> {
             Ok(())
         }
     }
+}
+
+/// Several entries with one decryption (one touch): pipe only, one password per line in the order
+/// asked. All or nothing: a missing name, or a password that holds a line break, prints nothing.
+/// Usernames go to stderr as "username NAME: USER", like the single get keeps stdout for secrets.
+fn get_many(identity: &Path, vault_path: &str, names: &[&String]) -> Result<(), String> {
+    if io::stdout().is_terminal() {
+        return Err("get with several names only writes to a pipe, never to the terminal".into());
+    }
+    let vault = load(identity, Path::new(vault_path), &open_trust()?)?;
+    let mut items = Vec::with_capacity(names.len());
+    for name in names {
+        let item = vault.get(name).ok_or_else(|| format!("no entry '{name}'"))?;
+        if item.password().contains('\n') || item.password().contains('\r') {
+            return Err(format!("entry '{name}' has a line break; get it on its own"));
+        }
+        items.push((name, item));
+    }
+    let mut out = String::new();
+    for (name, item) in &items {
+        if !item.username().is_empty() {
+            eprintln!("username {name}: {}", item.username());
+        }
+        out.push_str(item.password());
+        out.push('\n');
+    }
+    let result = io::stdout().write_all(out.as_bytes()).and_then(|()| io::stdout().flush());
+    out.zeroize();
+    result.map_err(|e| e.to_string())
 }
 
 fn one_positional<'a>(flags: &'a Flags, usage: &str) -> Result<[&'a str; 1], String> {
